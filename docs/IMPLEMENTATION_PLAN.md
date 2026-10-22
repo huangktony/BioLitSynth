@@ -1,6 +1,6 @@
 # BioLitSynth — Implementation & Specification Plan
 
-> **Status:** Draft v1 · 2026-10-22
+> **Status:** Draft v1.1 · 2026-10-22 (v1.1: LangGraph orchestration, updated critic model, model bake-off)
 > **Audience:** The project team (owners of architecture/spec) and coding agents (Claude Code / Codex) who implement it.
 > **Rule for coding agents:** This file sets the boundaries. Do **not** add features, agents, data sources, or infrastructure that are not listed here. If something seems missing, open a TODO in `docs/OPEN_QUESTIONS.md` and don't build it.
 
@@ -52,7 +52,7 @@ Anthropic's Research feature uses an **orchestrator-worker** pattern. A lead age
 |---|---|
 | Lead agent plans + persists plan to memory | Lead Agent writes `ResearchPlan` to the store before dispatching; every later stage reads it from the store, not from a context window |
 | Subagents get explicit objective, output format, tools, boundaries | Every handoff is a typed `TaskSpec` (§5.1). Subagents never get free-text instructions only. |
-| Parallel subagents with separate context | Query Builders, Fetchers, and Extractors run concurrently with `asyncio` and bounded semaphores |
+| Parallel subagents with separate context | Query Builders, Fetchers, and Extractors fan out via LangGraph `Send`, bounded by client-side semaphores |
 | Lead decides "more research needed?" | Lead runs **one** coverage check after extraction and may trigger **one** gap-filling round |
 | Dedicated CitationAgent at the end | Citation Agent maps sentences to `evidence_id` / PMID / quote |
 | Effort scaling by query complexity | Lead picks 2, 3, or 4 sub-questions based on question complexity (rubric in prompt) |
@@ -497,7 +497,7 @@ Prompts live in `prompts/<agent>.v<N>.md` and are versioned. The version string 
 ### 5.2 Query Builder (×k, parallel)
 - Converts a `SubQuestion` into PubMed syntax using `[MeSH Terms]`, `[tiab]`, boolean grouping, and filters.
 - **Tool:** `pubmed_count(query) -> int` (esearch with `rettype=count`).
-- **Refinement loop** (≤2): if hits = 0, broaden (drop a filter, OR in synonyms). If hits > 5,000, narrow (add a design filter, a MeSH major topic, or a date range). Target band: **20–2,000 hits**.
+- **Refinement loop** (≤2, implemented as a cycle in the `query_builder` subgraph): if hits = 0, broaden (drop a filter, OR in synonyms). If hits > 5,000, narrow (add a design filter, a MeSH major topic, or a date range). Target band: **20–2,000 hits**.
 - Every attempt is recorded in `refinement_history` and emitted as a trace span.
 
 ### 5.3 PubMed Fetcher (code)
@@ -565,6 +565,7 @@ Mirrors Anthropic's CitationAgent: it runs after synthesis and makes every state
   - `FAIL`: UNSUPPORTED or CONTRADICTED, wrong label, `species_extrapolation`, `causal_from_observational`, or `conflict_ignored`.
 
 ### 5.11 Router (code)
+Implemented as the LangGraph conditional-edge function `route_after_critic(state)`. It's pure Python and reads only `state` counters plus verdict statuses from the store.
 ```
 for each claim:
     if deterministic hard fail or critic FAIL:
@@ -609,7 +610,7 @@ Access layer: plain `sqlite3`, or `sqlmodel` if the team prefers ORM-style code.
 
 ### 6.2 Stage checkpoints (intermediate storage)
 Each stage also writes a JSON snapshot to `runs/<run_id>/<NN>_<stage>.json` (`01_plan.json`, `02_queries.json`, `03_papers.json`, `04_evidence.json`, `05_conflicts.json`, `06_claims_a0.json`, `07_cited_a0.json`, `08_verdicts_a0.json`, …). Uses:
-- **Resume:** `biolitsynth run --resume <run_id> --from synthesize` reloads the snapshots and skips earlier stages, so synthesis prompts can be iterated without re-fetching or re-extracting.
+- **Resume:** `biolitsynth run --resume <run_id> --from synthesize` reloads the snapshots and skips earlier stages, so synthesis prompts can be iterated without re-fetching or re-extracting. LangGraph's `SqliteSaver` checkpointer also lets an interrupted run continue from the last completed node, using `thread_id = run_id`. The snapshots are for people (diffing, fixtures); the checkpointer is for crash recovery.
 - **Replay/debug:** the snapshots are human-readable artifacts that can be diffed between runs.
 - **Tests:** golden snapshots are used as fixtures.
 
@@ -630,6 +631,7 @@ Each stage also writes a JSON snapshot to `runs/<run_id>/<NN>_<stage>.json` (`01
   2. Provenance explorer: click any sentence or claim to walk backward to evidence, quote, paper, query, and sub-question.
   3. Call ledger: model, tokens, cache hits, and retries per agent, plus a total for the run.
 - Export: `runs/<run_id>/trace.jsonl`. Optional later work (not MVP): an OpenTelemetry exporter for Langfuse/Phoenix.
+- **We do not depend on LangSmith.** Our tracer runs inside each LangGraph node so spans land in the same SQLite file as the provenance data the dashboard joins against. LangSmith may be switched on locally for debugging (`LANGSMITH_TRACING=true`), but no feature may require it.
 
 ---
 
@@ -639,23 +641,48 @@ Free-tier catalogs and limits change monthly. **Verify current model IDs and lim
 
 | Role | Recommended | Why |
 |---|---|---|
-| Lead, Query Builder, Synthesizer, Citation alignment, Conflict adjudication | **Google Gemini Flash** (the current Flash model on the AI Studio free tier) | Strong on reasoning and long-context benchmarks for its class. Native JSON-schema structured output (pass Pydantic models straight to `response_schema` in the `google-genai` SDK). Large context window. The most generous no-card free tier among frontier labs. |
-| Evidence Extractor (bulk) | **Gemini Flash-Lite** | Highest free RPM/RPD in the Gemini family. Extraction is a constrained, quote-anchored task that doesn't need the bigger model. |
-| **Critic** | **`gpt-oss-120b` on Groq** (free tier), or a Qwen model on Groq | Different model family from Gemini, which decorrelates errors. Strong reasoning benchmarks. Groq is very fast and supports JSON mode / structured outputs. |
+| Lead, Query Builder, Synthesizer, Citation alignment, Conflict adjudication | **Google Gemini Flash**: the newest Flash model on your AI Studio free tier (3.x line; confirm in AI Studio) | Gemini 3 Flash scores about 88–89% on GPQA Diamond and about 76–78% on SWE-bench Verified, and newer Flash versions score higher. Native JSON-schema structured output (Pydantic models go straight to `response_schema` in `google-genai`). The only frontier-lab model that is free with no credit card. |
+| Evidence Extractor (bulk) | **Gemini Flash-Lite** (newest on free tier) | Highest free RPM/RPD in the Gemini family. Extraction is a constrained, quote-anchored task. |
+| **Critic** | **DeepSeek V4.1 Flash via NVIDIA NIM** (build.nvidia.com, free key) · backup: **GLM-5.3** or **Kimi K3** on NIM | Near the top of the open-weight models on Artificial Analysis (~45 vs. 58 for the top closed model). Different model family from Gemini, which decorrelates errors. NIM is free with no per-token billing (~40 RPM reported) but needs phone verification. |
+| Fast fallback critic | `gpt-oss-120b` or Qwen on **Groq** free tier | Very fast, but ~10 points below Gemini Flash on GPQA. Its 8K tokens/min cap is tight for batched critique. |
 | Offline dev fallback | Local **Ollama** (e.g., Qwen3 8B/14B) | No rate limits for prompt iteration and CI. Quality is lower, so don't use it for the demo. |
 
 **Notes:**
+- **Model choice is decided by our own eval, not by general benchmarks.** GPQA and SWE-bench don't measure verbatim quote copying, claim–evidence entailment, or catching species and causal overreach. In P6, run a **bake-off**: the §11.4 injection suite and the quote-match rate across 2–3 candidate critics and 2 extractor candidates on one recorded run. Pick the winners and record results in `docs/MODEL_EVAL.md`.
+- Medical hallucination studies show that even strong models miss "near-miss" errors, and accuracy drops sharply when evidence has to be combined across documents. That is why the critic judges one claim at a time against only its cited evidence.
 - Gemini **Pro** models were reportedly removed from the free tier in 2026, so plan around Flash-class models.
 - Free-tier Gemini traffic may be used by Google to improve its products. That's fine here, because PubMed abstracts are public, but **never send private or unpublished data** through it.
 - **Fit check** (default run of 3 queries × 25 papers, ~60 unique papers after dedup): ~12 extraction calls, ~5 query calls, 2 lead, ~2 conflict, ~2 synth, 1 citation, ~4 critic ≈ **28–40 calls/run**, spread across 2 providers. A cold run fits free daily quotas with room for several runs a day. Re-runs are mostly cache hits.
-- **Implementation:** a thin `LLMClient` protocol (`complete(prompt, schema) -> BaseModel`) with `GeminiClient`, `GroqClient`, `OllamaClient`, and `FakeClient` (tests). Each client gets an async rate limiter (RPM + TPM) and exponential backoff on 429. Don't use LangChain or LiteLLM. The surface area is too small to justify them.
+- **Implementation:** a thin `LLMClient` protocol (`complete(prompt, schema) -> BaseModel`) with `GeminiClient`, `OpenAICompatClient` (covers NVIDIA NIM, Groq, and OpenRouter, which all expose OpenAI-compatible endpoints), `OllamaClient`, and `FakeClient` (tests). Each client gets an async rate limiter (RPM + TPM) and exponential backoff on 429. Don't use LangChain or LiteLLM. The surface area is too small to justify them.
 
 ---
 
 ## 8. Orchestration & Efficiency
 
-- **No agent framework.** Use a plain `asyncio` pipeline in `pipeline.py` with one function per stage. Each stage function has the signature `async def stage(run: RunContext) -> StageResult`, reads its inputs from the store, writes outputs plus a snapshot, and emits spans. This is easier for coding agents to implement correctly and easier for us to test than LangGraph or CrewAI.
-- **Concurrency:** `asyncio.gather` over queries and extraction batches, with semaphores sized from config (`ncbi_concurrency=5`, `llm_concurrency=4`).
+### 8.1 Orchestrator: LangGraph
+Nearly every stage iterates: query refinement (≤2), quote re-extraction (≤1), the coverage gap round (≤1), and critic retries (≤2). LangGraph handles bounded cycles, conditional routing, and per-step checkpoints natively. Its conditional edges are plain Python functions, so routing stays deterministic.
+
+**Rules for the graph:**
+1. **Nodes are thin.** Each node is `async def node(state: RunState) -> dict` that calls one agent or stage function in `biolitsynth/agents/` or `checks/`, writes results to SQLite, and returns only IDs and counters. Agent logic must be callable and testable without LangGraph.
+2. **State holds IDs, never blobs.** `RunState` (TypedDict) holds `run_id`, `question`, `sub_question_ids`, `query_ids`, `pmids`, `evidence_ids`, `conflict_ids`, `claim_ids`, `failed_claim_ids`, and counters (`coverage_rounds`, `synth_attempt`). SQLite is the single source of truth.
+3. **Routing is code.** Every conditional edge is a pure function of `state` plus store lookups: `route_after_coverage`, `route_after_checks`, `route_after_critic`. No LLM chooses edges.
+4. **Loops are bounded twice.** Explicit counters in state enforce the §1.3 limits, and `recursion_limit` (default 60) is a backstop that raises an error.
+5. **Fan-out uses `Send`.** One `Send` per query (fetch) and one per extraction batch. Concurrency is still capped by the semaphores and rate limiters in `llm/` and `pubmed/`, because LangGraph doesn't rate-limit.
+6. **Checkpointing:** `SqliteSaver` with `thread_id = run_id`, in a separate file (`data/checkpoints.db`) so graph internals don't mix with domain tables.
+7. **Subgraphs:** `query_builder` (draft → count → refine loop) is its own subgraph so its iterations show up as nested spans.
+
+Graph outline (mirrors §3):
+```
+START → plan → [Send per sub-question] query_builder(subgraph) → [Send per query] fetch → dedup
+      → [Send per batch] extract → quote_check → coverage
+      → route_after_coverage: {gap & rounds<1: query_builder, else: conflicts}
+      → conflicts → synthesize → cite → det_checks
+      → route_after_checks: {hard_fail: route_after_critic, else: critique}
+      → critique → route_after_critic: {fail & attempt<2: synthesize, else: assemble} → END
+```
+
+### 8.2 Efficiency
+- **Concurrency:** `Send` fan-out over queries and extraction batches, with semaphores sized from config (`ncbi_concurrency=5`, `llm_concurrency=4`) plus token-bucket rate limiters per provider.
 - **Token discipline:** subagents receive only their slice. The Extractor sees its 5 abstracts, the Critic sees only the cited evidence, the Synthesizer sees the compact table (not the abstracts), and the Lead sees only stats.
 - **Fail-fast:** a schema-invalid LLM output gets one repair retry, then the stage errors with the trace span marked `fail`. No silent fallbacks.
 
@@ -681,13 +708,13 @@ BioLitSynth/
 ├── prompts/                       # <agent>.v<N>.md
 ├── biolitsynth/
 │   ├── schemas/                   # enums, planning, paper, evidence, claims, verify, trace
-│   ├── llm/                       # client protocol, gemini, groq, ollama, fake, cache, ratelimit
+│   ├── llm/                       # client protocol, gemini, openai_compat (NIM/Groq/OpenRouter), ollama, fake, cache, ratelimit
 │   ├── pubmed/                    # eutils client, xml parser
 │   ├── agents/                    # lead, query_builder, extractor, conflict, synthesizer, citation, critic
 │   ├── checks/                    # quote_span, deterministic checker, router
 │   ├── store/                     # schema.sql, db.py, snapshots.py
 │   ├── trace/                     # tracer (contextvars spans)
-│   ├── pipeline.py                # orchestrator / stage runner / resume
+│   ├── graph/                     # LangGraph: state.py (RunState), nodes.py, routers.py, build.py (compile + checkpointer)
 │   ├── report.py                  # assembler (json + md)
 │   └── cli.py                     # `biolitsynth run "<question>" [--resume] [--from] [--inject-conflict]`
 ├── app/dashboard.py               # Streamlit
@@ -731,7 +758,7 @@ This section is the contract the Synthesizer, Checker, and Critic all enforce.
 - Quote span validator: exact match, whitespace/unicode variants, fuzzy snap, rejection.
 - Pydantic validators for every `ClaimType` rule.
 - Deterministic checker: one test per check ID in §5.9.
-- Router: every branch, including retry exhaustion.
+- Routers (`graph/routers.py`): every branch, including retry exhaustion and the coverage-round cap. Routers are pure functions, so they're tested without running the graph.
 - Tracer: nested async spans get correct parents.
 - Cache: same key hits, a prompt-version bump misses.
 
@@ -772,13 +799,13 @@ Each phase ends with passing tests and a short demo command. Don't start a phase
 
 | Phase | Scope | Acceptance criteria |
 |---|---|---|
-| **P0 Skeleton** | `pyproject`, config loader, all Pydantic schemas, `schema.sql`, tracer, `FakeClient`, CLI stub | `pytest tests/unit/test_schemas.py` passes; `biolitsynth run --dry` writes an empty run with trace |
+| **P0 Skeleton** | `pyproject`, config loader, all Pydantic schemas, `schema.sql`, tracer, `FakeClient`, CLI stub, LangGraph skeleton with no-op nodes and all routers | `pytest tests/unit/test_schemas.py tests/unit/test_routers.py` passes; `biolitsynth run --dry` walks the full graph (including one forced retry loop) and writes an empty run with trace |
 | **P1 Retrieval** | E-utilities client, rate limiter, XML parser, PubMed cache, dedup | Given a hand-written query, it fetches 25 papers, stores them, and re-runs with 0 network calls |
-| **P2 Plan + Query** | LLM clients (Gemini, Groq), LLM cache, Lead plan call, Query Builder with count refinement | Golden Q1 yields 3 sub-questions with distinct facets, and all queries land in 20–2,000 hits |
+| **P2 Plan + Query** | LLM clients (Gemini, OpenAI-compatible for NIM/Groq), LLM cache, Lead plan call, Query Builder with count refinement | Golden Q1 yields 3 sub-questions with distinct facets, and all queries land in 20–2,000 hits |
 | **P3 Extraction** | Extractor prompt, batching, quote span validator, strength rules | ≥95% quote match on golden Q1 and Q2; zero items without valid spans in the store |
 | **P4 Coverage + Conflicts** | Lead coverage call + one gap round; conflict grouping + adjudication | Golden Q2 yields ≥1 confirmed conflict citing both sides |
 | **P5 Synthesis + Citation** | Synthesizer, Citation Agent, report assembler (md/json) | Every sentence in `report.md` is either cited or classified as framing |
-| **P6 Verification** | Deterministic checker, Critic, Router, retry loop | All §11.4 injection tests pass at target rates |
+| **P6 Verification** | Deterministic checker, Critic, Router, retry loop, model bake-off (§7) | All §11.4 injection tests pass at target rates; `docs/MODEL_EVAL.md` records the chosen critic and extractor models |
 | **P7 Dashboard** | Streamlit: Question → Plan → Queries → Papers → Evidence → Conflicts → Report (with verdict badges) → Trace tab → Rejected claims | Live demo of golden Q1 end to end; clicking a sentence shows its full provenance chain |
 | **P8 Hardening (if time)** | Eval command, prompt tuning, resume UX | `biolitsynth eval` prints the §11.4 metrics |
 
@@ -788,7 +815,7 @@ Each phase ends with passing tests and a short demo command. Don't start a phase
 
 ## 13. Rules for Coding Agents (copy into `CLAUDE.md` / `AGENTS.md`)
 
-1. This plan is the spec. Don't add agents, data sources, frameworks, vector stores, or UI pages that aren't listed here.
+1. This plan is the spec. Don't add agents, data sources, frameworks, vector stores, or UI pages that aren't listed here. LangGraph is the only orchestration framework. No LangChain chains, agents, or retrievers.
 2. Never let an LLM produce PMIDs, quotes, offsets, strength grades, or verdict statuses that code can produce or check.
 3. Every LLM output must be a Pydantic model from `biolitsynth/schemas/`. No free-text parsing with regex.
 4. Every LLM or network call must go through the cached, rate-limited client and emit a trace span.
