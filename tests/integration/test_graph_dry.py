@@ -43,6 +43,37 @@ async def test_forced_loops_fire_exactly_once(harness):
     assert s["failed_claim_ids"] == []                     # the retry fixed it
 
 
+async def test_coverage_node_enforces_the_round_cap_itself(harness):
+    # The stub Lead keeps reporting the gap in round 2, like the real Lead (Appendix A). The node must not
+    # launch a second round, must not exceed the cap, and must keep the gap so it can become a GAP claim.
+    run_id, db, graph, cfg = harness
+    s = await graph.ainvoke(initial_state(run_id, Q, dry=True, force_loops=True), cfg)
+    assert s["coverage_rounds"] == 1
+    assert s["gap_sub_question_ids"] == []
+    assert s["unresolved_gap_ids"] == ["sq2"]
+    msgs = [e["message"] for e in stages(db, run_id, stage="coverage")]
+    assert msgs == ["gap round 1 for ['sq2']", "1 unresolved gap(s), no rounds left"]
+
+
+async def test_no_gaps_means_nothing_unresolved(harness):
+    run_id, db, graph, cfg = harness
+    s = await graph.ainvoke(initial_state(run_id, Q, dry=True, force_loops=False), cfg)
+    assert s["unresolved_gap_ids"] == [] and s["gap_sub_question_ids"] == []
+
+
+async def test_query_id_reused_for_a_different_sub_question_fails_loudly(harness, settings):
+    from biolitsynth.graph.nodes import build_query_builder
+    run_id, db, graph, cfg = harness
+    deps = Deps(settings=settings, db=db, tracer=Tracer(db, run_id), run_dir=settings.paths.runs_dir / run_id)
+    qb = build_query_builder(deps)
+    payload = {"query_id": "q1", "sub_question_id": "sq1", "round": 0}
+    await qb.ainvoke(payload)
+    await qb.ainvoke(payload)                               # re-execution after a crash: idempotent
+    assert len(db.query("SELECT * FROM queries WHERE run_id = ?", (run_id,))) == 1
+    with pytest.raises(RuntimeError, match="already belongs to sq1"):
+        await qb.ainvoke({**payload, "sub_question_id": "sq2"})
+
+
 async def test_no_state_list_ever_contains_duplicates(harness):
     run_id, db, graph, cfg = harness
     s = await graph.ainvoke(initial_state(run_id, Q, dry=True, force_loops=True), cfg)

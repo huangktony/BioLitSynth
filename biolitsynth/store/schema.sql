@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS queries (
 CREATE TABLE IF NOT EXISTS papers (
     pmid              TEXT PRIMARY KEY,
     title             TEXT NOT NULL,
+    authors_json      TEXT,                 -- needed by the clusterer's first-author rule (§5.4b)
     abstract          TEXT NOT NULL,
     abstract_sha256   TEXT NOT NULL,
     journal           TEXT,

@@ -1,7 +1,7 @@
 """Plan §4.2: planning & retrieval models."""
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .enums import Facet
 
@@ -28,6 +28,22 @@ class ResearchPlan(BaseModel):
     sub_questions: list[SubQuestion] = Field(min_length=2, max_length=4)
     bridges: list[Bridge] = Field(default=[], max_length=2)   # cross-literature hypotheses (§5.1)
     out_of_scope_notes: list[str] = []
+
+    @model_validator(mode="after")
+    def _cross_field_rules(self):
+        want = {"simple": 2, "moderate": 3, "complex": 4}[self.effort]
+        if len(self.sub_questions) != want:
+            raise ValueError(f"effort={self.effort!r} means {want} sub-questions, got {len(self.sub_questions)}")
+        ids = [s.id for s in self.sub_questions]
+        if len(set(ids)) != len(ids):
+            raise ValueError("sub-question ids must be unique")
+        if len({b.id for b in self.bridges}) != len(self.bridges):
+            raise ValueError("bridge ids must be unique")
+        for b in self.bridges:
+            for end in (b.from_sub_question_id, b.to_sub_question_id):
+                if end not in ids:
+                    raise ValueError(f"bridge {b.id} points at unknown sub-question {end!r}")
+        return self
 
 
 class CoverageGap(BaseModel):

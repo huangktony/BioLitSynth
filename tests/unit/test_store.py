@@ -22,6 +22,12 @@ def test_schema_applied_and_wal(db):
     assert db.query("PRAGMA journal_mode")[0][0] == "wal"
 
 
+def test_papers_table_keeps_every_paper_field_that_is_not_per_run(db):
+    # Paper fields stored per run instead: retrieved_by, rank_by_query (run_papers), study_id, relevance.
+    cols = {r["name"] for r in db.query("PRAGMA table_info(papers)")}
+    assert "authors_json" in cols   # clusterer needs first author; a cache hit must not lose it
+
+
 def test_reopening_is_idempotent(tmp_path):
     Database(tmp_path / "t.db").close()
     Database(tmp_path / "t.db").close()

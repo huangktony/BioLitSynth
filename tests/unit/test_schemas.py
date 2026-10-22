@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from biolitsynth.schemas import (Claim, ClaimType, Conflict, EvidenceItem, Paper, PubMedQuery, ResearchPlan,
+from biolitsynth.schemas import (Bridge, Claim, SideSummary, ClaimType, Conflict, EvidenceItem, Paper, PubMedQuery, ResearchPlan,
                                  StudyCluster, SubQuestion, TraceEvent, Verdict)
 
 
@@ -55,15 +55,46 @@ def test_claim_id_pattern(bad):
         claim(id=bad)
 
 
-@pytest.mark.parametrize("n,ok", [(1, False), (2, True), (4, True), (5, False)])
+def sqs(n):
+    return [SubQuestion(id=f"sq{i + 1}", text="t", facet="other", rationale="r", key_concepts=[]) for i in range(n)]
+
+
+def plan(n=3, effort="moderate", **kw):
+    return ResearchPlan(run_id="r", question="q", effort=effort, sub_questions=sqs(n), **kw)
+
+
+@pytest.mark.parametrize("n,effort", [(2, "simple"), (3, "moderate"), (4, "complex")])
+def test_plan_effort_matches_sub_question_count(n, effort):
+    plan(n, effort)
+
+
+@pytest.mark.parametrize("n,ok", [(1, False), (5, False)])
 def test_plan_sub_question_bounds(n, ok):
-    sqs = [SubQuestion(id=f"sq{i}", text="t", facet="other", rationale="r", key_concepts=[]) for i in range(n)]
-    build = lambda: ResearchPlan(run_id="r", question="q", effort="moderate", sub_questions=sqs)
-    if ok:
-        build()
-    else:
-        with pytest.raises(ValidationError):
-            build()
+    with pytest.raises(ValidationError):
+        plan(n, "moderate")
+
+
+@pytest.mark.parametrize("n,effort", [(2, "moderate"), (3, "simple"), (3, "complex"), (4, "moderate")])
+def test_plan_effort_mismatch_rejected(n, effort):
+    with pytest.raises(ValidationError, match="sub-questions"):
+        plan(n, effort)
+
+
+def test_plan_duplicate_sub_question_ids_rejected():
+    dup = sqs(3)
+    dup[2] = dup[2].model_copy(update={"id": "sq1"})
+    with pytest.raises(ValidationError, match="unique"):
+        ResearchPlan(run_id="r", question="q", effort="moderate", sub_questions=dup)
+
+
+def test_plan_bridge_must_point_at_existing_sub_questions():
+    ok = Bridge(id="br1", from_sub_question_id="sq2", to_sub_question_id="sq1", hypothesis="h")
+    plan(bridges=[ok])
+    bad = Bridge(id="br1", from_sub_question_id="sq2", to_sub_question_id="sq9", hypothesis="h")
+    with pytest.raises(ValidationError, match="unknown sub-question"):
+        plan(bridges=[bad])
+    with pytest.raises(ValidationError, match="bridge ids must be unique"):
+        plan(bridges=[ok, ok])
 
 
 def test_paper_pmid_pattern():
@@ -92,6 +123,25 @@ def test_conflict_needs_two_sides():
     with pytest.raises(ValidationError):
         Conflict(id="cf1", canonical_subject="a", canonical_outcome="b", sides=[], conflict_type="direction",
                  balance="balanced", status="unresolved", adjudicator_model="m")
+
+
+def conflict(balance, leaning):
+    side = lambda d: SideSummary(position=d, evidence_ids=["ev_1_1"], study_ids=["st1"], weight=3.0,
+                                 best_design="rct", organisms=["human"])
+    return Conflict(id="cf1", canonical_subject="a", canonical_outcome="b", sides=[side("increases"), side("decreases")],
+                    conflict_type="direction", balance=balance, leaning_side=leaning, status="unresolved",
+                    adjudicator_model="m")
+
+
+@pytest.mark.parametrize("balance,leaning", [("balanced", None), ("leans", "increases"), ("lopsided", "decreases")])
+def test_conflict_leaning_side_consistent_with_balance(balance, leaning):
+    conflict(balance, leaning)
+
+
+@pytest.mark.parametrize("balance,leaning", [("balanced", "increases"), ("leans", None), ("lopsided", None)])
+def test_conflict_leaning_side_inconsistent_rejected(balance, leaning):
+    with pytest.raises(ValidationError, match="leaning_side"):
+        conflict(balance, leaning)
 
 
 def test_enums_reject_unknown_values():

@@ -33,8 +33,10 @@ def dry_pmids(query_id: str, per_query: int = 4) -> list[str]:
     return [str(900_000_000 + n * 100 + i) for i in range(per_query)]
 
 
-def dry_gap(sub_question_ids: list[str], coverage_rounds: int, max_rounds: int, force: bool) -> list[str]:
-    return sub_question_ids[1:2] if force and coverage_rounds < max_rounds else []
+def dry_gaps(sub_question_ids: list[str], force: bool) -> list[str]:
+    """Gaps the Lead reports. Like the real Lead (Appendix A), it keeps reporting them after the round cap,
+    so the coverage node, not this stub, has to enforce the cap."""
+    return sub_question_ids[1:2] if force else []
 
 
 def dry_claims(attempt: int, redo: list[str] | None, sub_question_ids: list[str]) -> list[Claim]:

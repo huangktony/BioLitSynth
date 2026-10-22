@@ -1,7 +1,7 @@
 """Plan §4.3 and §4.4: evidence, term map, conflicts."""
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from .enums import Direction, Organism, StudyDesign
 
@@ -66,3 +66,9 @@ class Conflict(BaseModel):
     status: Literal["moderator_explained", "unresolved"] # LLM adjudication, must cite both sides
     explanations: list[ConflictExplanation] = []
     adjudicator_model: str
+
+    @model_validator(mode="after")
+    def _leaning_matches_balance(self):
+        if (self.balance == "balanced") != (self.leaning_side is None):
+            raise ValueError("leaning_side must be set exactly when balance != 'balanced'")
+        return self

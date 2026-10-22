@@ -83,8 +83,9 @@ def route_after_count(state: dict, *, min_hits: int, max_hits: int, max_refineme
 
 
 def route_after_coverage(state: RunState, *, max_extra_rounds: int) -> str:
-    """Gap round only if there are gaps AND the round cap holds. The node increments coverage_rounds when
-    it launches a round, so `<=` is the backstop check here."""
+    """The coverage node only fills gap_sub_question_ids when it is launching a round, and bumps
+    coverage_rounds when it does, so launched rounds are always <= max. The `<=` check is a second
+    barrier in case the node ever regresses (rule: loops are bounded twice)."""
     if state.get("gap_sub_question_ids") and state.get("coverage_rounds", 0) <= max_extra_rounds:
         return "dispatch_queries"
     return "cluster_studies"

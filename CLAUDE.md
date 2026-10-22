@@ -1,7 +1,7 @@
 # BioLitSynth: rules for coding agents
 
 `docs/IMPLEMENTATION_PLAN.md` is the spec. Read the section for the phase you are in (§12) before writing code.
-Current status: **P0 skeleton done** (graph runs on stubs). Next: P1 retrieval.
+Current status: **P0 skeleton done** (graph runs on stubs). Next: P1 retrieval. Read `docs/OPEN_QUESTIONS.md` first.
 
 ## Scope guard
 - Do not add agents, data sources, frameworks, vector stores, or UI pages the plan doesn't list.

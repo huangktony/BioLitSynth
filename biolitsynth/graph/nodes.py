@@ -85,6 +85,13 @@ def build_query_builder(deps: Deps):
         return {"refinements": s["refinements"] + 1, "query_string": s["query_string"] + " [refined]"}
 
     async def finalize(s: QBState) -> dict:
+        # Upsert so a node re-executed after a crash is idempotent, but an id already used for a
+        # DIFFERENT sub-question means id allocation broke: fail loudly instead of overwriting.
+        prior = deps.db.query("SELECT sub_question_id FROM queries WHERE run_id = ? AND id = ?",
+                              (deps.run_id, s["query_id"]))
+        if prior and prior[0]["sub_question_id"] != s["sub_question_id"]:
+            raise RuntimeError(f"query id {s['query_id']} already belongs to {prior[0]['sub_question_id']}, "
+                               f"not {s['sub_question_id']}")
         deps.db.insert("queries", {
             "run_id": deps.run_id, "id": s["query_id"], "sub_question_id": s["sub_question_id"],
             "query_string": s["query_string"], "filters_json": "{}", "hit_count": s["hit_count"],
@@ -178,12 +185,17 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
 
     async def coverage(state: RunState) -> dict:
         rounds = state.get("coverage_rounds", 0)
-        gaps = dry.dry_gap(state.get("sub_question_ids", []), rounds, st.limits.coverage_extra_rounds,
-                           state.get("dry_force_gap", False))
+        gaps = dry.dry_gaps(state.get("sub_question_ids", []), state.get("dry_force_gap", False))
+        # The node owns the cap (the LLM will keep reporting gaps after the last round). Launch only while
+        # rounds remain; otherwise the gaps are final and become GAP claims in the Synthesizer.
+        launch = bool(gaps) and rounds < st.limits.coverage_extra_rounds
         async with tr.span("coverage", "lead", input_refs=state.get("sub_question_ids", [])) as sp:
             sp.output_refs = gaps
-            sp.message = f"gap round {rounds + 1} for {gaps}" if gaps else "coverage OK / round cap reached"
-        return {"gap_sub_question_ids": gaps, "coverage_rounds": rounds + (1 if gaps else 0)}
+            sp.message = (f"gap round {rounds + 1} for {gaps}" if launch
+                          else f"{len(gaps)} unresolved gap(s), no rounds left" if gaps else "coverage OK")
+        return {"gap_sub_question_ids": gaps if launch else [],
+                "unresolved_gap_ids": [] if launch else gaps,
+                "coverage_rounds": rounds + (1 if launch else 0)}
 
     async def synthesize(state: RunState) -> dict:
         attempt = state.get("synth_attempt", -1) + 1
