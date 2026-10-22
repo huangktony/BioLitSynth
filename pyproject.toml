@@ -1,0 +1,42 @@
+[project]
+name = "biolitsynth"
+version = "0.0.1"
+description = "Multi-agent biomedical literature synthesis with verified, provenance-tracked claims"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic==2.14.1",
+    "pyyaml==6.0.3",
+    # LangGraph is the only orchestration framework (plan §8.1). Pinned: its API moves between minors.
+    "langgraph==1.2.16",
+    "langgraph-checkpoint-sqlite==3.1.2",
+    "aiosqlite==0.22.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+[project.scripts]
+biolitsynth = "biolitsynth.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["biolitsynth*"]
+
+[tool.setuptools.package-data]
+"biolitsynth.store" = ["schema.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "live: hits real network / LLM APIs (opt-in with -m live)",
+    "slow: loads real local models (opt-in with -m slow)",
+]
+addopts = "-m 'not live and not slow'"
