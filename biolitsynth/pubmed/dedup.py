@@ -29,7 +29,7 @@ class DedupResult:
     dropped: list[Dropped]
 
 
-def dedup_papers(entries: Iterable[tuple[str, int, str]], papers: dict[str, Paper]) -> DedupResult:
+def dedup_papers(entries: Iterable[tuple[str, str, int]], papers: dict[str, Paper]) -> DedupResult:
     """`entries` are (pmid, query_id, rank) rows from every query so far. A PMID found by several queries
     becomes one Paper with `retrieved_by` and `rank_by_query` unioned. Entries whose PMID has no stored paper
     are ignored (papers without abstracts are never stored)."""
