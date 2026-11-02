@@ -49,10 +49,21 @@ def main(argv: list[str] | None = None) -> int:
     ret.add_argument("--prompt-version", type=int, default=None,
                      help="Query Builder prompt version to evaluate (default: config.yaml prompt_versions, else latest)")
     ret.add_argument("--config", default=None, help="path to config.yaml")
+    serve = sub.add_parser("serve", help="read-only dashboard over the run store at http://127.0.0.1:<port>")
+    serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--config", default=None, help="path to config.yaml")
     args = ap.parse_args(argv)
 
     if args.cmd == "eval":
         return _eval(args)
+
+    if args.cmd == "serve":
+        import uvicorn
+        from .api import create_app
+        db_path = load_settings(args.config).paths.data_dir / "biolitsynth.db"
+        print(f"dashboard on http://127.0.0.1:{args.port}  (reading {db_path})")
+        uvicorn.run(create_app(db_path), host="127.0.0.1", port=args.port, log_level="warning")
+        return 0
 
     if args.cmd == "fetch":
         from .pubmed.demo import fetch_demo

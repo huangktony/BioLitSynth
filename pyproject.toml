@@ -17,6 +17,9 @@ dependencies = [
     "google-genai==2.31.0",
     "jinja2==3.1.6",               # prompt user-message templates (plan §5.0)
     "rapidfuzz==3.14.6",           # quote span validator fuzzy snap (plan §5.5)
+    # Read-only dashboard (`biolitsynth serve`); the same server grows into the §16 API in P7a.
+    "fastapi==0.162.0",
+    "uvicorn==0.54.0",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +40,7 @@ include = ["biolitsynth*"]
 
 [tool.setuptools.package-data]
 "biolitsynth.store" = ["schema.sql"]
+"biolitsynth.api" = ["static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

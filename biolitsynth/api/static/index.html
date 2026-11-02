@@ -1,0 +1,182 @@
+<!doctype html>
+<!-- Stopgap read-only dashboard over data/biolitsynth.db. Plain HTML + JS, no build step.
+     P7b's React app (plan §16) replaces this page; the /api/* endpoints it calls carry over. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BioLitSynth dashboard</title>
+<style>
+  :root { --accent: #0B6E66; --ink: #14171C; --muted: #555D6B; --line: #E1E4E8; --soft: #EEF0F3; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #F4F5F7; color: var(--ink); font: 14px/1.45 "IBM Plex Sans", system-ui, sans-serif; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; }
+  header { background: #fff; border-bottom: 1px solid var(--line); }
+  header .in { max-width: 1440px; margin: 0 auto; padding: 0 24px; min-height: 60px; display: flex; align-items: center; gap: 10px; }
+  header b { font-size: 16px; }
+  header .note { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .wrap { max-width: 1440px; margin: 0 auto; padding: 24px; display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  aside { flex: 1 1 240px; max-width: 300px; }
+  main { flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+  h1 { margin: 8px 0 16px; font-size: 26px; line-height: 1.2; }
+  h2 { margin: 0 0 12px; font-size: 16px; }
+  aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .run { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+  .run.on, .run:hover { background: var(--soft); }
+  .run small { display: block; font-size: 11px; color: var(--muted); }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: #E3F2EF; color: #0B5A53; }
+  .pill.grey { background: var(--soft); color: #3D4450; font-weight: 500; }
+  .pill.bad { background: #FBE4E4; color: #8A1C1C; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .kpi { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .kpi span { display: block; font-size: 12px; color: var(--muted); }
+  .kpi b { font-size: 26px; }
+  .stages { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .stages li { border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  .stages li.warn { background: #FFFBF3; }
+  .stages li.fail { background: #FDF0F0; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 999px; background: var(--accent); margin-right: 6px; }
+  .warn .dot { background: #C47A12; } .fail .dot { background: #B42318; }
+  .stages small { display: block; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .cols { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .cols > .wide { flex: 999 1 480px; min-width: 0; }
+  .cols > .side { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 20px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 500; padding: 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 10px 8px; border-bottom: 1px solid var(--soft); vertical-align: top; }
+  .tag { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; background: #E3F2EF; color: #0B5A53; }
+  .tag.gap { background: #FDF1DC; color: #6B3A06; }
+  .filters button { border: 0; background: var(--soft); padding: 6px 12px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px; }
+  .filters button[aria-pressed=true] { background: var(--accent); color: #fff; }
+  .row { display: flex; justify-content: space-between; gap: 10px; }
+  ul.plain { list-style: none; margin: 0; padding: 0; }
+  ul.plain li { padding: 8px 0; border-bottom: 1px solid var(--soft); font-size: 13px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); font-style: italic; }
+  .scroll { max-height: 420px; overflow: auto; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header><div class="in"><b>BioLitSynth</b><span class="muted">read-only dashboard</span>
+  <span class="note">Reads data/biolitsynth.db. Start runs from the CLI.</span></div></header>
+<div class="wrap">
+  <aside class="card"><h2>Runs</h2><div id="runs"><p class="empty">Loading…</p></div></aside>
+  <main id="main"><div class="card empty">Pick a run.</div></main>
+</div>
+<script>
+const $ = (tag, attrs = {}, ...kids) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") el.className = v; else if (k.startsWith("on")) el[k] = v; else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null) el.append(kid instanceof Node ? kid : String(kid));
+  return el;
+};
+const api = (path) => fetch(path).then((r) => { if (!r.ok) throw new Error(`${r.status} ${path}`); return r.json(); });
+const empty = (text) => $("p", { class: "empty" }, text);
+let current = null, claimFilter = "all";
+
+async function loadRuns() {
+  const runs = await api("/api/runs");
+  const box = document.getElementById("runs");
+  box.replaceChildren(...(runs.length ? runs.map((r) =>
+    $("button", { class: "run" + (r.run_id === current ? " on" : ""), onclick: () => show(r.run_id) },
+      r.question, $("small", { class: "mono" }, `${r.run_id} · ${r.status}`))) : [empty("No runs yet. Try: biolitsynth run \"…\" --dry")]));
+  if (!current && runs.length) show(runs[0].run_id);
+}
+
+async function show(runId) {
+  current = runId;
+  loadRuns();
+  const [d, papers, claims, trace] = await Promise.all([
+    api(`/api/runs/${runId}`), api(`/api/runs/${runId}/papers`),
+    api(`/api/runs/${runId}/claims`), api(`/api/runs/${runId}/trace`)]);
+  const c = d.counts;
+  const dry = d.status.includes("dry");
+  const main = document.getElementById("main");
+  main.replaceChildren(
+    $("section", { class: "card" },
+      $("div", {}, $("span", { class: "pill" + (d.status === "failed" ? " bad" : "") }, d.status), " ",
+        dry ? $("span", { class: "pill grey" }, "Dry run · stub data") : null, " ",
+        $("span", { class: "mono muted" }, d.run_id)),
+      $("h1", {}, d.question),
+      $("div", { class: "kpis" }, [
+        ["Queries", c.queries, `${c.sub_questions} sub-questions`],
+        ["Papers", c.papers, "after fetch"],
+        ["Evidence", c.evidence, "extractor lands in P3"],
+        ["Claims", c.claims, `${c.synth_attempts} synth attempt(s)`],
+        ["Gap rounds", c.gap_rounds, "extra coverage rounds"],
+        ["Trace events", c.trace_events, `${trace.totals.llm_calls} LLM calls`],
+      ].map(([l, v, n]) => $("div", { class: "kpi" }, $("span", {}, l), $("b", { class: "mono" }, v), $("span", {}, n))))),
+    $("section", { class: "card" }, $("h2", {}, "Pipeline"),
+      $("ol", { class: "stages" }, d.stages.map((s) =>
+        $("li", { class: s.failures ? "fail" : s.retries ? "warn" : "" },
+          $("span", { class: "mono" }, $("span", { class: "dot" }), s.stage),
+          $("small", {}, s.last_message || ""),
+          $("small", { class: "mono" }, `${s.events} ev · ${s.latency_ms} ms${s.retries ? ` · ${s.retries} retry` : ""}${s.failures ? ` · ${s.failures} fail` : ""}`))))),
+    $("div", { class: "cols" },
+      $("div", { class: "wide", style: "display:flex;flex-direction:column;gap:20px" },
+        claimsCard(claims), papersCard(papers)),
+      $("div", { class: "side" },
+        $("section", { class: "card" }, $("h2", {}, "Queries"),
+          d.queries.length ? $("ul", { class: "plain" }, d.queries.map((q) => $("li", {},
+            $("div", { class: "row" }, $("span", { class: "mono muted" }, `${q.id} → ${q.sub_question_id}`),
+              $("span", { class: "muted" }, `${q.hit_count ?? "?"} hits${q.round ? ` · gap round ${q.round}` : ""}${q.refinement_history.length > 1 ? ` · refined ${q.refinement_history.length - 1}×` : ""}`)),
+            $("div", { class: "mono" }, q.query_string)))) : empty("No queries stored.")),
+        $("section", { class: "card" }, $("h2", {}, "Coverage"),
+          d.coverage.length ? $("ul", { class: "plain" }, d.coverage.map((g) => $("li", {}, g.message,
+            g.gap_sub_question_ids.length ? $("div", { class: "mono muted" }, g.gap_sub_question_ids.join(", ")) : null)))
+            : empty("No coverage step in this run.")),
+        traceCard(trace))));
+}
+
+function claimsCard(claims) {
+  const card = $("section", { class: "card" });
+  const draw = () => {
+    const rows = claims.filter((c) => claimFilter === "all" || (claimFilter === "gap") === (c.claim_type === "gap"));
+    card.replaceChildren(
+      $("div", { class: "row" }, $("h2", {}, "Claims"),
+        $("div", { class: "filters" }, [["all", "All"], ["other", "Non-gap"], ["gap", "Gaps"]].map(([id, label]) =>
+          $("button", { "aria-pressed": String(claimFilter === id), onclick: () => { claimFilter = id; draw(); } }, label)))),
+      rows.length ? $("table", {}, $("thead", {}, $("tr", {}, ["ID", "Claim", "Type", "Attempts", "Evidence"].map((h) => $("th", {}, h)))),
+        $("tbody", {}, rows.map((c) => $("tr", {},
+          $("td", { class: "mono" }, c.id), $("td", {}, c.text),
+          $("td", {}, $("span", { class: "tag" + (c.claim_type === "gap" ? " gap" : "") }, c.claim_type)),
+          $("td", { class: "mono" }, c.attempts),
+          $("td", { class: "mono muted" }, c.evidence_ids.join(", ") || "none")))))
+        : empty("No claims."));
+  };
+  draw();
+  return card;
+}
+
+function papersCard(papers) {
+  return $("section", { class: "card" }, $("h2", {}, `Papers (${papers.length})`),
+    papers.length ? $("div", { class: "scroll" }, $("table", {},
+      $("thead", {}, $("tr", {}, ["PMID", "Title", "Year", "Rank by query"].map((h) => $("th", {}, h)))),
+      $("tbody", {}, papers.map((p) => $("tr", {},
+        $("td", { class: "mono" }, $("a", { href: `https://pubmed.ncbi.nlm.nih.gov/${p.pmid}/`, target: "_blank", rel: "noopener" }, p.pmid)),
+        $("td", {}, p.title, p.is_retracted ? $("span", { class: "tag gap" }, " retracted") : null,
+          p.journal ? $("div", { class: "muted" }, p.journal) : null),
+        $("td", { class: "mono" }, p.year ?? ""),
+        $("td", { class: "mono muted" }, Object.entries(p.rank_by_query).map(([q, r]) => `${q}#${r}`).join(" "))))))
+    ) : empty("No papers. Dry runs fetch nothing; try: biolitsynth fetch \"<PubMed query>\""));
+}
+
+function traceCard(trace) {
+  const byId = Object.fromEntries(trace.events.map((e) => [e.span_id, e]));
+  const depth = (e) => { let n = 0; while (e.parent_span_id && byId[e.parent_span_id] && n < 10) { e = byId[e.parent_span_id]; n++; } return n; };
+  return $("section", { class: "card" }, $("h2", {}, `Trace (${trace.totals.events} events)`),
+    $("ul", { class: "plain scroll mono", style: "font-size:12px" }, trace.events.map((e) => $("li", { class: "row" },
+      $("span", { style: `padding-left:${depth(e) * 14}px` },
+        `${e.stage}/${e.agent}`, e.status !== "ok" ? ` [${e.status}]` : "",
+        e.message ? $("div", { class: "muted", style: "font-family:inherit" }, e.message) : null),
+      $("span", { class: "muted" }, `${e.latency_ms ?? 0} ms`)))));
+}
+
+loadRuns().catch((err) => document.getElementById("runs").replaceChildren(empty(String(err))));
+</script>
+</body>
+</html>
