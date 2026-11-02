@@ -1,13 +1,14 @@
 # BioLitSynth: rules for coding agents
 
 `docs/IMPLEMENTATION_PLAN.md` is the spec. Read the section for the phase you are in (§12) before writing code.
-Current status: **P0 done; P1 retrieval built** (real fetch + dedup behind `dry=False`; everything else still stubs).
-Next: the verifier half of W1 (quote validator), then P2. Read `docs/OPEN_QUESTIONS.md` first.
+Current status: **P0 and P1 accepted** (real fetch + dedup behind `dry=False`; everything else still stubs).
+Next: the verifier half of W1 (quote validator), then P2, but only when Tony says to start. Read `docs/OPEN_QUESTIONS.md` first.
 
 ## Scope guard
 - Do not add agents, data sources, frameworks, vector stores, or UI pages the plan doesn't list.
 - LangGraph is the only orchestration framework. No `langchain*` imports (a test enforces this).
 - Don't start a phase before the previous one's acceptance criteria pass.
+- At the end of each phase: commit, run the acceptance demo and show Tony the output, then stop. Do not start the next phase until Tony says "accepted."
 - Ambiguous requirement? Append it to `docs/OPEN_QUESTIONS.md`, pick the simplest option consistent with the plan.
 
 ## Invariants
