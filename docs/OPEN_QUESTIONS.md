@@ -36,6 +36,24 @@ contradictions in the plan; the rest are places the plan was silent or loose. Re
     option is used, `effort` must be set to match.
 13. **`papers.authors_json`** added to §6.1's table. Without it a cached paper loses `Paper.authors`, and the
     clusterer's first-author rule (§5.4b) would silently never fire.
+14. **PubMed's retraction-notice type is `Retraction Notice`, not `Retraction of Publication`** (§5.4). Verified
+    against live efetch output on 2026-11-02; a search for the plan's name returns 0 records. Dedup drops both names,
+    plus `Published Erratum` and `Comment`. `Retracted Publication` (the paper itself) matches the plan.
+15. **No `usehistory=y`.** §5.3 says esearch with `usehistory=y`, then efetch. We pass explicit PMID lists (at most 200)
+    because the cache is per PMID, so a WebEnv handle adds nothing.
+16. **Registry ids come from two `DataBankName`s only** (ClinicalTrials.gov, ISRCTN) plus the `NCT\d{8}|ISRCTN\d{8}`
+    regex over the abstract. Other databanks (GenBank, PDB, ...) are not study identifiers and are ignored.
+17. **Abstract text format.** Structured abstracts become `LABEL: text` lines joined by `\n` (no trailing newline),
+    labels exactly as PubMed spells them (`CLINICAL TRIAL` has a space). Plain abstracts are stored as written.
+    Nothing is normalised at parse time; the quote validator (P1, other half) normalises.
+18. **The seed `StudyDesign` from publication types (§5.4) is not built.** `Paper` has no field for it and nothing
+    consumes it before the extractor, so it moves to P3.
+19. **A `biolitsynth fetch "<query>"` command was added** as the P1 demo (the plan lists only `run`). Delete it if
+    you would rather keep the CLI to `run`.
+20. **Rate limiter spaces requests evenly (no burst)**, 3 per second without an NCBI key and 10 with one.
+21. **About 1 in 5 search hits has no abstract** (5 of 25 in the recorded sample) and is skipped, so
+    `retmax_candidates=100` yields roughly 80 usable papers before reranking. Two queries that run at the same time
+    and share a PMID can each download it; the cache makes the next run free, so this is left alone.
 
 ## Deviations from the §4 schemas (not in the plan text)
 - `EvidenceItem.id` is constrained to `^ev_\d+_\d+$`. Reject-by-default; loosen it if another id format is needed.
@@ -65,14 +83,13 @@ contradictions in the plan; the rest are places the plan was silent or loose. Re
   resume. The researcher's edits arrive in that value, so apply them there when the API is built.
 - **Config and paths are relative to the working directory.** Fine from the repo root (README says so).
 
-## Before starting P1 (nothing below exists yet)
-- `pubmed/` package; `httpx` and `lxml` (or Biopython; pick one) in `pyproject.toml`.
-- A shared async token-bucket rate limiter; an `ncbi:` block in `config.yaml` (tool, email; `NCBI_API_KEY` from env).
-- Caches: `data/cache/pubmed/<pmid>.xml` and the esearch cache (§6.3, 7-day TTL). The latter has **no table in
-  §6.1**; add one.
-- `tests/fixtures/pubmed/*.xml` must be recorded from real efetch calls by a person (CLAUDE.md fixture rule),
-  including a retracted paper, a structured abstract with inline markup, a missing abstract, and a `MedlineDate`.
-- Test "re-run makes 0 network calls" offline with an `httpx.MockTransport` that counts requests; keep the live
-  25-paper fetch as a `-m live` test.
-- P0 stubs have no real `await` points, so Send branches run nearly serially. Concurrency bugs (interleaved SQLite
-  writes, span parenting under real I/O) are not exercised at graph level yet; P1's fetch fan-out is the first test.
+## P1 status (retrieval)
+Done: `pubmed/` (rate limiter, parser, client, dedup), `httpx` + `lxml` pinned, `ncbi:` config block (secrets by
+env var name: `NCBI_API_KEY`, `NCBI_EMAIL`), per-PMID XML cache, `esearch_cache` table, recorded fixtures in
+`tests/fixtures/pubmed/` (see its README), real `fetch` and `dedup` nodes behind `dry=False`.
+
+Still open:
+- Fixtures were recorded by a coding agent; the other teammate should review them (checkbox in the fixtures README).
+- The first live concurrency test is the 3-query graph run; it uses a mock NCBI, so real parallel fetches against
+  NCBI itself have only been exercised by the single-query `fetch` demo.
+- B's half of W1 (draft schemas, quote-span validator, the first deterministic checks) is not started.

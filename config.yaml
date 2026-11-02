@@ -31,4 +31,13 @@ budget:                       # §8.2
 
 graph: {recursion_limit: 60}
 
+ncbi:                         # §5.3. Keys come from env vars (names below), never from this file.
+  tool: biolitsynth
+  email_env: NCBI_EMAIL       # optional but recommended by NCBI
+  api_key_env: NCBI_API_KEY   # optional: 10 req/s with a key, 3 req/s without
+  esearch_ttl_days: 7         # §6.3
+  efetch_batch_size: 200
+  max_retries: 3
+  timeout_s: 30
+
 paths: {data_dir: data, runs_dir: runs}

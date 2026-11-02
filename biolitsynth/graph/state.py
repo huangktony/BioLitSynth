@@ -34,6 +34,7 @@ class RunState(TypedDict, total=False):
     query_ids: UniqueIds            # every query ever built this run, all rounds
     fetched_query_ids: UniqueIds    # queries whose fetch finished
     pmids: UniqueIds                # candidate PMIDs
+    dropped_pmids: UniqueIds        # removed by dedup: retracted papers and notices/errata
     kept_pmids: UniqueIds           # survived rerank
     extracted_pmids: UniqueIds      # already sent through the extractor
     evidence_ids: UniqueIds

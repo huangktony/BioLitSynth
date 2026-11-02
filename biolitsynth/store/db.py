@@ -15,7 +15,7 @@ from typing import Any, Iterable, Sequence
 
 from pydantic import BaseModel
 
-from ..schemas import ResearchPlan, TraceEvent
+from ..schemas import Paper, ResearchPlan, TraceEvent
 
 
 def utcnow_iso() -> str:
@@ -79,6 +79,48 @@ class Database:
             "INSERT OR REPLACE INTO sub_questions (run_id, id, text, facet, rationale) VALUES (?,?,?,?,?)",
             [(plan.run_id, s.id, s.text, s.facet.value, s.rationale) for s in plan.sub_questions],
         )
+
+    # --- papers (shared across runs) and per-run provenance -----------------------------------
+    def upsert_paper(self, p: Paper) -> None:
+        self.insert("papers", {
+            "pmid": p.pmid, "title": p.title, "authors_json": json.dumps(p.authors), "abstract": p.abstract,
+            "abstract_sha256": p.abstract_sha256, "journal": p.journal, "year": p.year, "doi": p.doi,
+            "pub_types_json": json.dumps(p.publication_types), "mesh_json": json.dumps(p.mesh_terms),
+            "registry_ids_json": json.dumps(p.registry_ids), "is_retracted": int(p.is_retracted),
+            "fetched_at": utcnow_iso(),
+        }, replace=True)
+
+    def get_papers(self, pmids: Sequence[str]) -> dict[str, Paper]:
+        """Per-run fields (retrieved_by, rank_by_query, study_id, relevance) are not stored on `papers`."""
+        if not pmids:
+            return {}
+        rows = self.query(f"SELECT * FROM papers WHERE pmid IN ({','.join('?' * len(pmids))})", list(pmids))
+        return {r["pmid"]: Paper(
+            pmid=r["pmid"], title=r["title"], abstract=r["abstract"], abstract_sha256=r["abstract_sha256"],
+            authors=json.loads(r["authors_json"] or "[]"), journal=r["journal"], year=r["year"], doi=r["doi"],
+            publication_types=json.loads(r["pub_types_json"] or "[]"), mesh_terms=json.loads(r["mesh_json"] or "[]"),
+            registry_ids=json.loads(r["registry_ids_json"] or "[]"), is_retracted=bool(r["is_retracted"]),
+            retrieved_by=[], rank_by_query={},
+        ) for r in rows}
+
+    def add_run_papers(self, run_id: str, query_id: str, ranked: Iterable[tuple[str, int]]) -> None:
+        self.executemany("INSERT OR REPLACE INTO run_papers (run_id, pmid, query_id, rank) VALUES (?,?,?,?)",
+                         [(run_id, pmid, query_id, rank) for pmid, rank in ranked])
+
+    def run_paper_entries(self, run_id: str) -> list[sqlite3.Row]:
+        return self.query("SELECT pmid, query_id, rank FROM run_papers WHERE run_id = ? ORDER BY query_id, rank",
+                          (run_id,))
+
+    # --- esearch cache (plan §6.3) ---------------------------------------------------------------
+    def get_esearch(self, key: str, *, max_age_s: float, now: float) -> tuple[int, list[str]] | None:
+        rows = self.query("SELECT total, pmids_json, created_at FROM esearch_cache WHERE key = ?", (key,))
+        if not rows or now - rows[0]["created_at"] > max_age_s:
+            return None
+        return rows[0]["total"], json.loads(rows[0]["pmids_json"])
+
+    def put_esearch(self, key: str, query: str, retmax: int, sort: str, total: int, pmids: list[str], now: float) -> None:
+        self.insert("esearch_cache", {"key": key, "query": query, "retmax": retmax, "sort": sort, "total": total,
+                                      "pmids_json": json.dumps(pmids), "created_at": now}, replace=True)
 
     # --- trace -------------------------------------------------------------------------------
     def insert_trace_event(self, e: TraceEvent) -> None:

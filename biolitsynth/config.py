@@ -59,6 +59,17 @@ class Budget(_Strict):
     max_tokens_per_run: int | None = None
 
 
+class NcbiConfig(_Strict):
+    """E-utilities settings (plan §5.3). Secrets are read from environment variables named here, never stored."""
+    tool: str = "biolitsynth"
+    email_env: str = "NCBI_EMAIL"
+    api_key_env: str = "NCBI_API_KEY"
+    esearch_ttl_days: float = 7
+    efetch_batch_size: int = Field(200, ge=1, le=200)
+    max_retries: int = Field(3, ge=0, le=6)
+    timeout_s: float = 30
+
+
 class GraphConfig(_Strict):
     recursion_limit: int = 60
 
@@ -76,6 +87,7 @@ class Settings(_Strict):
     concurrency: Concurrency = Concurrency()
     budget: Budget = Budget()
     graph: GraphConfig = GraphConfig()
+    ncbi: NcbiConfig = NcbiConfig()
     paths: Paths = Paths()
 
 

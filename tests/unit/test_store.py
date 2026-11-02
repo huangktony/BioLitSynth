@@ -67,3 +67,28 @@ def test_snapshot_roundtrip_and_naming(tmp_path):
     assert p.name == "06_claims_a0.json" and p == snapshot_path(tmp_path, 6, "claims", 0)
     assert read_snapshot(tmp_path, 6, "claims", 0) == [{"b": 1, "a": 2}]
     assert write_snapshot(tmp_path, 1, "plan", {}).name == "01_plan.json"
+
+
+def test_paper_survives_a_round_trip_through_sqlite_including_authors(db):
+    from biolitsynth.pubmed import parse_pubmed_xml
+    from ..pubmed_mock import fixture
+
+    original = parse_pubmed_xml(fixture("retracted_rct_registry_41911553")).papers[0]
+    db.upsert_paper(original)
+    back = db.get_papers([original.pmid])[original.pmid]
+    assert back == original and back.authors and back.is_retracted and back.registry_ids == ["NCT06128967"]
+
+
+def test_run_papers_keep_provenance_per_query(db):
+    db.add_run_papers("r", "q1", [("1", 1), ("2", 2)])
+    db.add_run_papers("r", "q2", [("2", 7)])
+    db.add_run_papers("other", "q1", [("9", 1)])
+    assert [(r["pmid"], r["query_id"], r["rank"]) for r in db.run_paper_entries("r")] == [
+        ("1", "q1", 1), ("2", "q1", 2), ("2", "q2", 7)]
+
+
+def test_esearch_cache_respects_max_age(db):
+    db.put_esearch("k", "q", 5, "relevance", 99, ["1", "2"], now=100.0)
+    assert db.get_esearch("k", max_age_s=10, now=105.0) == (99, ["1", "2"])
+    assert db.get_esearch("k", max_age_s=10, now=111.0) is None
+    assert db.get_esearch("missing", max_age_s=10, now=105.0) is None

@@ -9,5 +9,11 @@ The spec is [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md); rules fo
     .venv/bin/pytest
     .venv/bin/biolitsynth run "Does metformin reduce cancer risk?" --dry
 
+To try retrieval on its own (live NCBI, 3 requests per second without a key; set `NCBI_API_KEY` for 10):
+
+    .venv/bin/biolitsynth fetch "metformin AND colorectal neoplasms[mh] AND humans[mh]"
+
+Run it twice: the second run reports `network calls 0`.
+
 `--dry` walks the whole LangGraph pipeline on stubs (no network, no LLM), forces every bounded loop once, and
 writes `runs/<run_id>/` (plan snapshot, claims snapshots, `trace.jsonl`) plus `data/biolitsynth.db`.

@@ -216,6 +216,17 @@ CREATE TABLE IF NOT EXISTS trace_events (
 );
 CREATE INDEX IF NOT EXISTS idx_trace_run ON trace_events (run_id, ts);
 
+-- esearch results, TTL from config (§6.3). key = sha256(query | retmax | sort). created_at = unix seconds.
+CREATE TABLE IF NOT EXISTS esearch_cache (
+    key        TEXT PRIMARY KEY,
+    query      TEXT NOT NULL,
+    retmax     INTEGER NOT NULL,
+    sort       TEXT NOT NULL,
+    total      INTEGER NOT NULL,
+    pmids_json TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+
 -- key = sha256(model | prompt_version | rendered prompt | schema); table is created now, used from P2
 CREATE TABLE IF NOT EXISTS llm_cache (
     key            TEXT PRIMARY KEY,

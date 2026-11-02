@@ -17,6 +17,7 @@ from langgraph.types import interrupt
 from ..config import Settings
 from ..schemas import Stage
 from ..store import Database, write_snapshot
+from ..pubmed import PubMedClient, dedup_papers
 from ..trace import Tracer
 from . import dry
 from .routers import route_after_count
@@ -31,6 +32,7 @@ class Deps:
     db: Database
     tracer: Tracer
     run_dir: Path
+    pubmed: PubMedClient | None = None     # None is fine for dry runs; real fetch needs it
 
     @property
     def run_id(self) -> str:
@@ -164,15 +166,50 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
     async def fetch(payload: dict) -> dict:
         qid = payload["query_id"]
         async with tr.span("fetch", "pubmed_fetcher", input_refs=[qid], parent=payload.get("parent_span_id")) as sp:
-            pmids = dry.dry_pmids(qid)
+            if payload.get("dry"):
+                pmids = dry.dry_pmids(qid)
+                sp.message = f"{qid}: {len(pmids)} synthetic candidates"
+            else:
+                if deps.pubmed is None:
+                    raise RuntimeError("a non-dry fetch needs Deps.pubmed (a PubMedClient)")
+                row = db.query("SELECT query_string FROM queries WHERE run_id = ? AND id = ?", (deps.run_id, qid))
+                if not row:
+                    raise RuntimeError(f"query {qid} is not in the store")
+                got = await deps.pubmed.search_and_fetch(row[0]["query_string"], retmax=st.limits.retmax_candidates,
+                                                         parent=sp.span_id)
+                for paper in got.fetch.papers:
+                    db.upsert_paper(paper)
+                db.add_run_papers(deps.run_id, qid, got.ranked())
+                for s in got.fetch.skipped:
+                    await tr.event("fetch", "pubmed_fetcher", "validation", parent=sp.span_id,
+                                   input_refs=[f"pmid:{s.pmid}"], message=f"fetch.skipped_{s.reason} pmid:{s.pmid}")
+                pmids = [p.pmid for p in got.fetch.papers]
+                sp.message = (f"{qid}: {len(pmids)} papers ({got.fetch.cache_hits} cached), "
+                              f"{len(got.fetch.skipped)} skipped, {got.search.total} total hits")
             sp.output_refs = [f"pmid:{p}" for p in pmids]
-            sp.message = f"{qid}: {len(pmids)} synthetic candidates"
         return {"pmids": pmids, "fetched_query_ids": [qid]}
+
+    async def dedup(state: RunState) -> dict:
+        if state.get("dry"):
+            async with tr.span("dedup", "dedup") as sp:
+                sp.message = "no-op in dry runs"
+            return {}
+        async with tr.span("dedup", "dedup", input_refs=[f"pmid:{p}" for p in state.get("pmids", [])]) as sp:
+            entries = [(r["pmid"], r["query_id"], r["rank"]) for r in db.run_paper_entries(deps.run_id)]
+            result = dedup_papers(entries, db.get_papers(sorted({e[0] for e in entries})))
+            for d in result.dropped:
+                await tr.event("dedup", "dedup", "validation", parent=sp.span_id, input_refs=[f"pmid:{d.pmid}"],
+                               message=f"{d.log_key} pmid:{d.pmid} {d.detail}")
+            write_snapshot(deps.run_dir, 3, "papers", list(result.papers.values()))
+            sp.output_refs = [f"pmid:{p}" for p in result.papers]
+            sp.message = f"{len(result.papers)} kept, {len(result.dropped)} dropped"
+        return {"dropped_pmids": [d.pmid for d in result.dropped]}
 
     async def rerank(state: RunState) -> dict:
         async with tr.span("rerank", "reranker", input_refs=[f"pmid:{p}" for p in state.get("pmids", [])]) as sp:
             sp.message = "keep all (stub; MedCPT arrives in P3)"
-        return {"kept_pmids": state.get("pmids", []), "dispatch_span_id": sp.span_id}
+        dropped = set(state.get("dropped_pmids", []))
+        return {"kept_pmids": [p for p in state.get("pmids", []) if p not in dropped], "dispatch_span_id": sp.span_id}
 
     async def extract(payload: dict) -> dict:
         pmids = payload["pmids"]
@@ -249,7 +286,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         "approve_queries": approve_queries,
         "dispatch_fetch": dispatch_fetch,
         "fetch": fetch,
-        "dedup": noop("dedup", "dedup", "no-op (stub; dedup + retraction filter arrive in P1)"),
+        "dedup": dedup,
         "rerank": rerank,
         "extract": extract,
         "quote_check": noop("extract", "quote_span_validator", "no-op (stub)", event_type="validation"),

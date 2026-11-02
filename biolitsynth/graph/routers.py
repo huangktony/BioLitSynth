@@ -49,7 +49,8 @@ def fan_out_fetch(state: RunState) -> list[Send] | str:
     pending = [q for q in state.get("query_ids", []) if q not in done]
     if not pending:
         return "dedup"
-    return [Send("fetch", {"query_id": q, "parent_span_id": state.get("dispatch_span_id")}) for q in pending]
+    return [Send("fetch", {"query_id": q, "dry": state.get("dry", False),
+                           "parent_span_id": state.get("dispatch_span_id")}) for q in pending]
 
 
 def fan_out_extract(state: RunState, *, batch_size: int) -> list[Send] | str:
