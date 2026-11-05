@@ -1,12 +1,14 @@
 """Shared retry policy for provider clients (plan §7, §8.3).
 
-429 and 5xx back off exponentially (2 s, 4 s, … capped at 60 s) up to `max_retries`. Output that fails schema
+429, 5xx, timeouts and dropped connections (httpx timeout/transport errors, asyncio timeouts) back off exponentially (2 s, 4 s, … capped at 60 s) up to `max_retries`. Output that fails schema
 validation gets exactly one repair retry, then the ValidationError is raised.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Awaitable, Callable
 
+import httpx
 from pydantic import ValidationError
 
 from .base import T
@@ -23,6 +25,8 @@ class ProviderHTTPError(RuntimeError):
 
 
 def retryable(exc: BaseException) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.TransportError, asyncio.TimeoutError, TimeoutError)):
+        return True
     return getattr(exc, "code", None) in RETRYABLE
 
 

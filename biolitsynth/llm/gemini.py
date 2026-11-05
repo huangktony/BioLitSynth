@@ -23,6 +23,12 @@ class MissingApiKey(RuntimeError):
     pass
 
 
+def _http_options(cfg: ProviderConfig):
+    """Per-request timeout for the SDK. google-genai takes milliseconds; config.yaml uses seconds."""
+    from google.genai import types
+    return types.HttpOptions(timeout=int(cfg.timeout_s * 1000))
+
+
 class GeminiClient:
     def __init__(self, model: str, cfg: ProviderConfig, *, env: Mapping[str, str] | None = None,
                  generate: Generate | None = None, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
@@ -43,7 +49,7 @@ class GeminiClient:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=api_key)
+        client = genai.Client(api_key=api_key, http_options=_http_options(self.cfg))
 
         async def generate(prompt: str, schema: type, system: str | None) -> tuple[str, Usage | None]:
             resp = await client.aio.models.generate_content(

@@ -1,9 +1,13 @@
 """GeminiClient guards and retries, with the SDK call replaced (no network)."""
+import asyncio
+
+import httpx
 import pytest
 from google.genai import errors
 from pydantic import ValidationError
 
 from biolitsynth.config import ProviderConfig
+from biolitsynth.llm.gemini import _http_options
 from biolitsynth.llm import GeminiClient, MissingApiKey, ModelNotVerified
 from biolitsynth.schemas import QueryDraft
 
@@ -81,3 +85,33 @@ async def test_invalid_output_gets_exactly_one_repair_retry():
     with pytest.raises(ValidationError):
         await GeminiClient("gemini-x", CFG, generate=gen).complete("u", QueryDraft)
     assert len(calls) == 2
+
+
+def test_sdk_timeout_comes_from_config_in_milliseconds():
+    assert _http_options(ProviderConfig(api_key_env="K", rpm=10)).timeout == 60000
+    assert _http_options(ProviderConfig(api_key_env="K", rpm=10, timeout_s=12.5)).timeout == 12500
+
+
+@pytest.mark.parametrize("exc", [httpx.ReadTimeout("stalled"), httpx.ConnectError("dropped"), asyncio.TimeoutError()])
+async def test_timeouts_and_dropped_connections_are_retried(exc):
+    slept = []
+
+    async def sleep(s):
+        slept.append(s)
+    gen, calls = scripted(exc, GOOD)
+    out = await GeminiClient("gemini-x", CFG, generate=gen, sleep=sleep).complete("u", QueryDraft)
+    assert out.query_string == "a AND b" and len(calls) == 2 and slept == [2.0]
+
+
+async def test_timeout_on_every_attempt_raises_after_max_retries_plus_one_calls():
+    gen, calls = scripted(*[httpx.ReadTimeout("stalled") for _ in range(CFG.max_retries + 1)])
+    with pytest.raises(httpx.ReadTimeout):
+        await GeminiClient("gemini-x", CFG, generate=gen, sleep=nosleep).complete("u", QueryDraft)
+    assert len(calls) == CFG.max_retries + 1
+
+
+async def test_other_exceptions_are_not_retried():
+    gen, calls = scripted(ValueError("bad"))
+    with pytest.raises(ValueError):
+        await GeminiClient("gemini-x", CFG, generate=gen, sleep=nosleep).complete("u", QueryDraft)
+    assert len(calls) == 1

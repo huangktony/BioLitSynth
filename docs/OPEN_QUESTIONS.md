@@ -163,6 +163,12 @@ Decided in code (the plan is silent or loose):
     whitespace; soft hyphens are dropped during normalization; the stored quote is always `abstract[start:end]`.
 39. **Check results for the whole report use `claim_id="*"`.** `pmid_in_run` covers both the evidence behind each
     claim and every citation in the sentences.
+40. **Hang fixed (seen 2026-11-05 from the dashboard).** A live run sat 5+ minutes in its first Lead call on a
+    TCP connection to Google that never answered. Cause: `GeminiClient` gave the SDK no request timeout
+    (`providers.gemini.timeout_s` was never passed), and `retryable` only retried HTTP codes, so a timeout or
+    dropped connection would not have been retried either. Fix: `http_options=HttpOptions(timeout=timeout_s * 1000)`
+    (the SDK counts milliseconds), and `retryable` now also retries httpx timeout/transport errors and asyncio
+    timeouts, with the same backoff.
 
 Still open:
 - **BioASQ, by a person:** register, download the Task B training set to `data/eval/bioasq/`, check its license,
