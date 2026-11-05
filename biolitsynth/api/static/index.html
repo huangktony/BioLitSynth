@@ -297,6 +297,8 @@ document.getElementById("search").onsubmit = async (ev) => {
 const pct = (x) => (x == null ? "n/a" : `${(x * 100).toFixed(1)}%`);
 const num = (x) => (x == null ? "n/a" : String(x));
 let currentEval = null, evalLoaded = false;
+// replaceChildren stringifies null, so drop the "cond ? el : null" slots first.
+const fill = (el, ...kids) => el.replaceChildren(...kids.filter((k) => k != null));
 
 function setTab(name) {
   document.getElementById("research").classList.toggle("hidden", name !== "research");
@@ -313,7 +315,7 @@ async function loadSubset() {
   try {
     const s = await api("/api/eval/subset");
     const create = "biolitsynth eval select --bioasq data/eval/bioasq/training14b.json";
-    box.replaceChildren(
+    fill(box,
       $("div", {}, $("span", { class: "pill grey" }, `dev ${s.dev}`), " ", $("span", { class: "pill grey" }, `held back ${s.held_back}`),
         " ", $("span", { class: "muted" }, s.reviewed_by ? `reviewed by ${s.reviewed_by}` : "")),
       !s.source_present ? $("div", { class: "amber" }, "BioASQ source file missing (data/eval/bioasq/training14b.json). Download it, then create the subset with: ",
