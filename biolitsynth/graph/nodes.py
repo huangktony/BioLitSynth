@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from ..agents import lead as lead_agent
 from ..agents import query_builder as qbuild
 from ..config import Settings
 from ..llm import StageLLM
@@ -37,7 +38,7 @@ class Deps:
     run_dir: Path
     pubmed: PubMedClient | None = None     # None is fine for dry runs; real fetch needs it
     llms: dict[str, StageLLM] = field(default_factory=dict)   # role (config.yaml models.*) -> StageLLM
-    manual_plan: ResearchPlan | None = None  # sub-questions given by hand, until the Lead's plan call exists
+    manual_plan: ResearchPlan | None = None  # sub-questions given by hand; None = the Lead plans
 
     @property
     def run_id(self) -> str:
@@ -174,9 +175,13 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
             if state.get("dry"):
                 p, how = dry.dry_plan(deps.run_id, state["question"], st.limits.sub_questions), "stub"
             elif deps.manual_plan is not None:
-                p, how = deps.manual_plan, "given by hand; the Lead's plan call is not built yet"
+                p, how = deps.manual_plan, "given by hand"
             else:
-                raise RuntimeError("the Lead's plan call is not built yet: pass the sub-questions by hand")
+                built = await lead_agent.plan_question(deps.run_id, state["question"], deps.llm("lead"),
+                                                       max_sub_questions=st.limits.sub_questions, parent=sp.span_id)
+                for w in built.warnings:
+                    await tr.event("plan", "lead", "validation", parent=sp.span_id, message=w)
+                p, how = built.plan, "Lead"
             db.save_plan(p)
             write_snapshot(deps.run_dir, 1, "plan", p)
             sp.output_refs = [s.id for s in p.sub_questions]

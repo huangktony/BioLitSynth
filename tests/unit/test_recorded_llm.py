@@ -20,3 +20,14 @@ def test_fixture_is_a_real_recording():
 def test_recorded_reply_parses_and_passes_the_draft_checks(row):
     q = check_draft(QueryDraft.model_validate_json(row["response_json"]))
     assert "[" in q and "metformin" in q.lower()            # uses field tags; keeps the shared key concept
+
+
+def test_recorded_lead_reply_builds_a_plan_with_distinct_facets():
+    """P2 acceptance, checked on the recorded live reply: golden Q1 → 3 sub-questions with distinct facets."""
+    from biolitsynth.agents.lead import build_plan
+    from biolitsynth.schemas import PlanDraft
+    rows = json.loads((FIX.parent / "lead_live_20261105.json").read_text())
+    assert len(rows) == 1 and rows[0]["prompt_version"] == "lead.v1"
+    built = build_plan("r", "golden Q1", PlanDraft.model_validate_json(rows[0]["response_json"]), max_sub_questions=3)
+    facets = [s.facet for s in built.plan.sub_questions]
+    assert built.plan.effort == "moderate" and len(set(facets)) == 3 and built.warnings == []

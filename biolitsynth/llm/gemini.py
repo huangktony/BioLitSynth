@@ -1,7 +1,6 @@
 """Gemini client (plan §7) on the google-genai SDK, with JSON-schema structured output.
 
-Retries: 429 and 5xx back off exponentially up to `max_retries`; output that fails schema validation gets one
-repair retry (plan §8.3), then raises. The SDK call is injectable (`generate=`) so tests never touch the network.
+Retries follow llm/retry.py (429/5xx backoff, one repair retry on invalid output). The SDK call is injectable (`generate=`) so tests never touch the network.
 """
 from __future__ import annotations
 
@@ -9,14 +8,10 @@ import asyncio
 import os
 from typing import Awaitable, Callable, Mapping
 
-from pydantic import ValidationError
-
 from ..config import ProviderConfig
 from .base import T
+from .retry import Generate, Usage, complete_with_retries
 
-Usage = tuple[int | None, int | None]
-Generate = Callable[[str, type, "str | None"], Awaitable[tuple[str, "Usage | None"]]]
-RETRYABLE = {429, 500, 502, 503, 504}
 PLACEHOLDER = "TODO-verify"
 
 
@@ -26,10 +21,6 @@ class ModelNotVerified(ValueError):
 
 class MissingApiKey(RuntimeError):
     pass
-
-
-def _retryable(exc: BaseException) -> bool:
-    return getattr(exc, "code", None) in RETRYABLE
 
 
 class GeminiClient:
@@ -65,22 +56,8 @@ class GeminiClient:
         return generate
 
     async def complete_with_usage(self, prompt: str, schema: type[T], *, system: str | None = None) -> tuple[T, Usage | None]:
-        attempt, repaired = 0, False
-        while True:
-            try:
-                text, usage = await self._generate(prompt, schema, system)
-            except Exception as exc:
-                if _retryable(exc) and attempt < self.cfg.max_retries:
-                    await self._sleep(min(2.0 * 2 ** attempt, 60.0))
-                    attempt += 1
-                    continue
-                raise
-            try:
-                return schema.model_validate_json(text), usage
-            except ValidationError:
-                if repaired:
-                    raise
-                repaired = True
+        return await complete_with_retries(self._generate, prompt, schema, system,
+                                           max_retries=self.cfg.max_retries, sleep=self._sleep)
 
     async def complete(self, prompt: str, schema: type[T], *, system: str | None = None) -> T:
         return (await self.complete_with_usage(prompt, schema, system=system))[0]

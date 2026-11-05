@@ -102,14 +102,22 @@ Still open:
   NCBI itself have only been exercised by the single-query `fetch` demo.
 - B's half of W1 (draft schemas, quote-span validator, the first deterministic checks) is not started.
 
-## P2 status (query half: LLM Query Builder)
-Started 2026-11-05 with Tony's go-ahead. Scope: the Query Builder only; the Lead's plan call is not built.
+## P2 status
+Started 2026-11-05 with Tony's go-ahead. Code for P2 is complete; acceptance still needs the BioASQ run (a person).
 
-Done: `llm/gemini.py` (google-genai, JSON-schema output, 429/5xx backoff, one repair retry on invalid output),
-`llm/stage.py` (`StageLLM`: trace span per call → LLM cache → run budget → concurrency cap + rate limiter → client),
-`llm/prompts.py` (versioned prompt files), `prompts/query_builder.v1.md`, `schemas/drafts.py` (`QueryDraft`),
-`agents/query_builder.py` (draft, count, refine, pick), the real query_builder subgraph behind `dry=False`, and
-`biolitsynth run "<question>" --sub-question ... --sub-question ...` (live: stops after dedup). 44 new offline tests.
+Done:
+- LLM clients: `llm/gemini.py` (google-genai) and `llm/openai_compat.py` (NIM / Groq / OpenRouter, plain httpx),
+  sharing `llm/retry.py` (429/5xx backoff, one repair retry). `llm/stage.py` (`StageLLM`: span → cache → budget →
+  rate limit → client). `llm/prompts.py` (versioned prompt files). Local `.env` loading (`biolitsynth/env.py`).
+- Lead plan call: `prompts/lead.v1.md`, `PlanDraft`, `agents/lead.py`. A live run with no `--sub-question` plans
+  with the Lead. Live on golden Q1: 3 sub-questions, facets clinical_outcome / mechanism / epidemiology, 1 bridge,
+  all 3 queries in band on the first draft (127, 469, 417 hits), 271 papers after dedup.
+- Query Builder: `prompts/query_builder.v1.md`, `QueryDraft`, `agents/query_builder.py`, real subgraph.
+- BioASQ retrieval eval (§11.3b): `biolitsynth eval select` (applies the selection rules, writes ids only) and
+  `biolitsynth eval retrieval` (recall@fetch, the first draft's recall for D2, miss buckets).
+- W1 verifier half: `checks/quote_span.py` (§5.5) and `checks/deterministic.py` with the seven schema-only §5.9
+  checks; the four W1 injections from §11.4 are caught. Not wired into the graph yet: claims are stubs until P5.
+- Recorded live replies in `tests/fixtures/llm/` (Lead and Query Builder).
 
 Decided in code (the plan is silent or loose):
 22. **Sub-questions are given by hand until the Lead exists.** `--sub-question "text | concept; concept"`, 2-4 of
@@ -136,7 +144,31 @@ Decided in code (the plan is silent or loose):
     `jinja2==3.1.6`.
 31. **Each refinement costs one extra esearch** (count-only, `retmax=0`), cached 7 days like every esearch.
 
+32. **`limits.sub_questions` is the Lead's maximum** (default 3, cap 4); dry runs still use it as the exact count.
+    The Lead may return 2 to that number; extras are cut and logged.
+33. **The Lead's draft has no ids and no effort.** Code numbers sub-questions `sq1…`, sets effort from the count
+    (2/3/4 → simple/moderate/complex), refers to bridges by 1-based position and drops bad ones. Repeated facets and
+    key-concept counts outside 2-5 are trace warnings (`lead.*`), not errors: they are what D1 measures.
+34. **The Lead's user message omits the run id** (Appendix A includes it), so the same question hits the LLM cache.
+35. **`.env` is read by a 20-line loader**, not python-dotenv; exported variables win. The test suite sets
+    `BIOLITSYNTH_NO_DOTENV=1` and clears key variables. Before that guard existed, one test made a real live run on
+    the question "q?" (one Lead and a few Query Builder/NCBI calls); its cached reply was not kept as a fixture.
+36. **OpenAI-compatible structured output:** `response_format: json_schema` by default, `structured: json_object`
+    (schema in the system prompt) for servers without it. Not checked live: there is no NIM key yet.
+37. **Retrieval eval details:** recall@fetch is measured on esearch candidates before efetch, so papers without an
+    abstract still count (slightly optimistic). Missed PMIDs are tested with `(<query>) AND (<pmid>[pmid] OR …)`
+    probes: `beyond_cap` or `not_matched`. Splitting `not_matched` into buckets c/d needs a broad query (D6, P3).
+    Default budget for one eval: 200 LLM calls.
+38. **Quote validator:** fuzzy matching only for quotes of 20+ characters; snapped spans are trimmed of edge
+    whitespace; soft hyphens are dropped during normalization; the stored quote is always `abstract[start:end]`.
+39. **Check results for the whole report use `claim_id="*"`.** `pmid_in_run` covers both the evidence behind each
+    claim and every citation in the sentences.
+
 Still open:
+- **BioASQ, by a person:** register, download the Task B training set to `data/eval/bioasq/`, check its license,
+  run `biolitsynth eval select --bioasq <file>`, review the ids and set `reviewed_by`, then
+  `biolitsynth eval retrieval --bioasq <file> --split dev`. That gives D2. **D1** also needs the golden questions'
+  anchor PMIDs, which a person picks.
 - **Live check done 2026-11-05** with `gemini-3.8-flash` (picked from `models.list` as the newest stable Flash;
   `models.query` only, the other roles still hold placeholders). Results:
   - metformin/CRC, 2 sub-questions: both queries valid, all key concepts present, in band on the first draft

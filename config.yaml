@@ -1,7 +1,7 @@
 # All model IDs live here; no model name is hard-coded in code (plan §7).
 # TODO(P2): replace the placeholders after checking AI Studio / build.nvidia.com by hand.
 models:
-  lead:        {provider: gemini,        model: TODO-verify-gemini-flash}
+  lead:        {provider: gemini,        model: gemini-3.8-flash}   # verified via models.list 2026-11-05
   query:       {provider: gemini,        model: gemini-3.8-flash}   # verified via models.list 2026-11-05
   extractor:   {provider: gemini,        model: TODO-verify-gemini-flash-lite}
   normalizer:  {provider: gemini,        model: TODO-verify-gemini-flash}
@@ -42,5 +42,7 @@ ncbi:                         # §5.3. Keys come from env vars (names below), ne
 
 providers:                    # §7. Keys come from env vars (names below), never from this file.
   gemini: {api_key_env: GEMINI_API_KEY, rpm: 10, max_retries: 4}   # rpm: free-tier guess; set from AI Studio
+  openai_compat:              # NVIDIA NIM (critic, P6). Groq: base_url https://api.groq.com/openai/v1, GROQ_API_KEY
+    {api_key_env: NVIDIA_API_KEY, base_url: "https://integrate.api.nvidia.com/v1", rpm: 40, max_retries: 4}
 
 paths: {data_dir: data, runs_dir: runs}

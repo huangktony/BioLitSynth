@@ -48,7 +48,7 @@ async def run_graph(settings, ncbi, *, with_client=True):
     db.create_run(run_id, "q?", settings)
     client = PubMedClient(settings.ncbi, db, settings.paths.data_dir / "cache" / "pubmed", tracer=tracer,
                           transport=ncbi.transport, env={}, limiter=TokenBucket(10_000)) if with_client else None
-    llms = make_stage_llms(settings, db, tracer, clients={"query": scripted()},
+    llms = make_stage_llms(settings, db, tracer, roles=("query",), clients={"query": scripted()},
                            limiters={"gemini": TokenBucket(10_000)})
     deps = Deps(settings=settings, db=db, tracer=tracer, run_dir=run_dir, pubmed=client, llms=llms,
                 manual_plan=manual_plan(run_id, "q?", SUBQ))

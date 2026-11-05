@@ -11,7 +11,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from ..config import Settings
-from ..llm import CallBudget, GeminiClient, LLMClient, StageLLM
+from ..llm import CallBudget, GeminiClient, LLMClient, OpenAICompatClient, StageLLM
 from ..pubmed import PubMedClient, TokenBucket
 from ..schemas import Facet, ResearchPlan, SubQuestion
 from ..store import Database
@@ -85,7 +85,7 @@ LIVE_STOP_AFTER = "dedup"
 
 
 def manual_plan(run_id: str, question: str, specs: list[str]) -> ResearchPlan:
-    """Sub-questions given by hand, each "text" or "text | concept; concept". Stands in for the Lead's plan call."""
+    """Sub-questions given by hand, each "text" or "text | concept; concept". Replaces the Lead's plan call."""
     if not 2 <= len(specs) <= 4:
         raise ValueError(f"give 2 to 4 sub-questions, got {len(specs)}")
     sqs = []
@@ -98,23 +98,27 @@ def manual_plan(run_id: str, question: str, specs: list[str]) -> ResearchPlan:
     return ResearchPlan(run_id=run_id, question=question, effort=_EFFORT[len(sqs)], sub_questions=sqs)
 
 
-_ROLES = (("query", "query", "query_builder"),)     # roles with a real agent so far: (role, stage, agent)
+_ROLES = (("lead", "plan", "lead"), ("query", "query", "query_builder"))   # real agents so far: (role, stage, agent)
 
 
-def resolve_clients(settings: Settings, clients: dict[str, LLMClient] | None = None) -> dict[str, LLMClient]:
+def resolve_clients(settings: Settings, clients: dict[str, LLMClient] | None = None, *,
+                    roles: tuple[str, ...]) -> dict[str, LLMClient]:
     """Provider client per role, built from config.yaml + environment unless overridden. Fails before any run
     state is written if a model id is still a placeholder or a key is missing."""
-    out = dict(clients or {})
-    for role, _, _ in _ROLES:
+    out = {r: c for r, c in (clients or {}).items() if r in roles}
+    for role in roles:
         if role not in out:
             ref = getattr(settings.models, role)
-            if ref.provider != "gemini":
-                raise NotImplementedError(f"provider {ref.provider!r} for models.{role} has no client yet")
-            out[role] = GeminiClient(ref.model, settings.providers.gemini)
+            if ref.provider == "gemini":
+                out[role] = GeminiClient(ref.model, settings.providers.gemini)
+            elif ref.provider == "openai_compat":
+                out[role] = OpenAICompatClient(ref.model, settings.providers.openai_compat)
+            else:
+                raise NotImplementedError(f"provider {ref.provider!r} for models.{role} has no client")
     return out
 
 
-def make_stage_llms(settings: Settings, db: Database, tracer: Tracer, *,
+def make_stage_llms(settings: Settings, db: Database, tracer: Tracer, *, roles: tuple[str, ...],
                     clients: dict[str, LLMClient] | None = None,
                     limiters: dict[str, TokenBucket] | None = None) -> dict[str, StageLLM]:
     """StageLLMs for the roles that have real agents so far. `clients` overrides the provider client per role
@@ -123,9 +127,11 @@ def make_stage_llms(settings: Settings, db: Database, tracer: Tracer, *,
     budget = CallBudget(settings.budget.max_llm_calls_per_run)
     sem = asyncio.Semaphore(settings.concurrency.llm)
     limiters = dict(limiters or {})
-    clients = resolve_clients(settings, clients)
+    clients = resolve_clients(settings, clients, roles=roles)
     out = {}
     for role, stage, agent in _ROLES:
+        if role not in roles:
+            continue
         ref, client = getattr(settings.models, role), clients[role]
         if ref.provider not in limiters:
             limiters[ref.provider] = TokenBucket(getattr(settings.providers, ref.provider).rpm / 60)
@@ -139,6 +145,7 @@ class LiveSummary:
     run_id: str
     run_dir: Path
     state: dict
+    plan: ResearchPlan
     queries: list[dict]
     papers_kept: int
     papers_dropped: int
@@ -148,22 +155,24 @@ class LiveSummary:
     trace_path: Path
 
 
-async def run_live(question: str, sub_questions: list[str], settings: Settings, *,
+async def run_live(question: str, sub_questions: list[str] | None, settings: Settings, *,
                    clients: dict[str, LLMClient] | None = None, limiters: dict[str, TokenBucket] | None = None,
                    transport=None, ncbi_env=None, ncbi_limiter: TokenBucket | None = None,
                    run_id: str | None = None) -> LiveSummary:
-    """Question → hand-given sub-questions → LLM Query Builder (esearch-refined) → fetch → dedup, then stop."""
+    """Question → Lead plan (or hand-given sub-questions) → LLM Query Builder (esearch-refined) → fetch → dedup,
+    then stop."""
     run_id = run_id or new_run_id()
     data_dir, run_dir = settings.paths.data_dir, settings.paths.runs_dir / run_id
-    plan = manual_plan(run_id, question, sub_questions)        # validate before creating anything
-    clients = resolve_clients(settings, clients)
+    plan = manual_plan(run_id, question, sub_questions) if sub_questions else None   # validate before writing
+    roles = ("query",) if plan else ("lead", "query")
+    clients = resolve_clients(settings, clients, roles=roles)
     run_dir.mkdir(parents=True, exist_ok=True)
     db = Database(data_dir / "biolitsynth.db")
     pubmed = None
     try:
         db.create_run(run_id, question, settings)
         tracer = Tracer(db, run_id)
-        llms = make_stage_llms(settings, db, tracer, clients=clients, limiters=limiters)
+        llms = make_stage_llms(settings, db, tracer, roles=roles, clients=clients, limiters=limiters)
         pubmed = PubMedClient(settings.ncbi, db, data_dir / "cache" / "pubmed", tracer=tracer,
                               concurrency=settings.concurrency.ncbi, transport=transport, env=ncbi_env,
                               limiter=ncbi_limiter)
@@ -189,7 +198,7 @@ async def run_live(question: str, sub_questions: list[str], settings: Settings, 
         llm_events = [r for r in db.trace_events(run_id) if r["event_type"] == "llm_call"]
         dropped = len(state.get("dropped_pmids", []))
         return LiveSummary(
-            run_id=run_id, run_dir=run_dir, state=dict(state), queries=queries,
+            run_id=run_id, run_dir=run_dir, state=dict(state), plan=db.get_plan(run_id), queries=queries,
             papers_kept=len(set(state.get("pmids", [])) - set(state.get("dropped_pmids", []))),
             papers_dropped=dropped, llm_calls=sum(1 for r in llm_events if not r["cache_hit"]),
             llm_cache_hits=sum(1 for r in llm_events if r["cache_hit"]), network_calls=pubmed.network_calls,

@@ -16,6 +16,7 @@ dependencies = [
     # LLM clients (plan §7). The Gemini SDK maps a Pydantic model to response_schema.
     "google-genai==2.31.0",
     "jinja2==3.1.6",               # prompt user-message templates (plan §5.0)
+    "rapidfuzz==3.14.6",           # quote span validator fuzzy snap (plan §5.5)
 ]
 
 [project.optional-dependencies]

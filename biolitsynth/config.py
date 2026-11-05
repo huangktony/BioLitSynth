@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -75,10 +76,17 @@ class ProviderConfig(_Strict):
     api_key_env: str
     rpm: float = Field(10, gt=0)          # requests per minute; the client spaces calls to stay under it
     max_retries: int = Field(4, ge=0, le=8)
+    base_url: str | None = None           # OpenAI-compatible providers only, e.g. NIM or Groq
+    # OpenAI-compatible only: "json_schema" sends the Pydantic schema as response_format; "json_object" asks for
+    # plain JSON and puts the schema in the system prompt, for servers that don't support json_schema.
+    structured: Literal["json_schema", "json_object"] = "json_schema"
+    timeout_s: float = 60
 
 
 class Providers(_Strict):
     gemini: ProviderConfig = ProviderConfig(api_key_env="GEMINI_API_KEY")
+    openai_compat: ProviderConfig = ProviderConfig(api_key_env="NVIDIA_API_KEY",
+                                                   base_url="https://integrate.api.nvidia.com/v1", rpm=40)
 
 
 class GraphConfig(_Strict):

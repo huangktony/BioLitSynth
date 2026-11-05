@@ -100,3 +100,25 @@ def test_manual_plan_parses_concepts_and_sets_effort():
     p = manual_plan("r", "q", ["A | x; y ;", "B", "C"])
     assert p.effort == "moderate" and [s.id for s in p.sub_questions] == ["sq1", "sq2", "sq3"]
     assert p.sub_questions[0].key_concepts == ["x", "y"] and p.sub_questions[1].key_concepts == []
+
+
+async def test_without_sub_questions_the_lead_plans(settings):
+    """The Lead's (scripted) plan drives the Query Builders; the plan stored is the one code built from it."""
+    lead_reply = {"sub_questions": [
+        {"text": "metformin and colorectal cancer incidence", "facet": "epidemiology", "rationale": "r",
+         "key_concepts": ["metformin", "colorectal neoplasms"]},
+        {"text": "metformin trials in colorectal cancer", "facet": "clinical_outcome", "rationale": "r",
+         "key_concepts": ["metformin", "randomized controlled trial"]}],
+        "bridges": [{"from_sub_question": 2, "to_sub_question": 1, "hypothesis": "h"}], "out_of_scope_notes": []}
+    client = ScriptedClient([("<question>", lead_reply), *script().script])
+    n = ncbi()
+    lv = await run_live(QUESTION, None, settings, clients={"lead": client, "query": client},
+                        transport=n.transport, **FAST)
+    assert lv.plan.effort == "simple" and [s.facet.value for s in lv.plan.sub_questions] == ["epidemiology",
+                                                                                              "clinical_outcome"]
+    assert lv.plan.bridges[0].from_sub_question_id == "sq2"
+    assert {r["query_string"] for r in lv.queries} == {REFINED1, DRAFT2} and lv.llm_calls == 4
+    db = Database(settings.paths.data_dir / "biolitsynth.db")
+    spans = [r for r in db.trace_events(lv.run_id) if r["event_type"] == "llm_call"]
+    assert {r["prompt_version"] for r in spans} == {"lead.v1", "query_builder.v1"}
+    db.close()
