@@ -1,8 +1,11 @@
-"""Dashboard API over the SQLite store: the GET endpoints of plan §16.3, plus POST /api/fetch.
+"""Dashboard API over the SQLite store: the GET endpoints of plan §16.3, plus two ways to start work.
 
-POST /api/fetch runs the P1 fetch demo (one hand-written PubMed query) from the browser; it is the only
-endpoint that writes, and only through `fetch_demo`. Research-question runs, SSE and approval arrive in P7a.
-The page in static/ is a stopgap that P7b's React app replaces.
+- POST /api/runs {question}: a live run through `graph.runner.run_live` (Lead plan, LLM Query Builder, fetch,
+  dedup; it stops there until P3). Same code path as `biolitsynth run "<question>"`.
+- POST /api/fetch {query}: the P1 fetch demo for one hand-written PubMed query.
+These are the only endpoints that write, and only through those two functions. One job at a time: free-tier LLM
+quota and NCBI rate limits are per user. SSE progress and query approval arrive in P7a; the page in static/ is a
+stopgap that P7b's React app replaces.
 """
 from __future__ import annotations
 
@@ -17,6 +20,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from ..config import Settings
+from ..graph.runner import run_live
+from ..llm import BudgetExceeded, MissingApiKey, ModelNotVerified
 from ..pubmed.demo import fetch_demo
 from ..store import Database
 
@@ -30,13 +35,18 @@ class FetchRequest(BaseModel):
     retmax: int = Field(25, ge=1, le=200)
 
 
-def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
-    """`transport` swaps in a fake NCBI for tests."""
+class RunRequest(BaseModel):
+    question: str = Field(min_length=15, max_length=1000)   # plan §16.3
+
+
+def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None,
+               live_overrides: dict | None = None) -> FastAPI:
+    """`transport` swaps in a fake NCBI and `live_overrides` (clients, limiters, ...) go to run_live; both for tests."""
     db = Database(settings.paths.data_dir / "biolitsynth.db")
     app = FastAPI(title="BioLitSynth dashboard")
     app.state.db = db
     app.router.on_shutdown.append(db.close)
-    fetch_lock = asyncio.Lock()   # one fetch at a time, so two clicks cannot double the request rate to NCBI
+    job_lock = asyncio.Lock()     # one run or fetch at a time (shared LLM quota and NCBI rate limit)
 
     def run_or_404(run_id: str):
         row = db.get_run(run_id)
@@ -61,11 +71,27 @@ def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None
     def index() -> str:
         return resources.files("biolitsynth.api").joinpath("static/index.html").read_text()
 
+    @app.post("/api/runs")
+    async def start_run(req: RunRequest) -> dict:
+        if job_lock.locked():
+            raise HTTPException(409, "a run or fetch is already in progress; wait for it to finish")
+        async with job_lock:
+            try:
+                lv = await run_live(req.question.strip(), None, settings, transport=transport, **(live_overrides or {}))
+            except (MissingApiKey, ModelNotVerified) as exc:    # raised before any run row is written
+                raise HTTPException(400, f"cannot start: {exc}") from exc
+            except BudgetExceeded as exc:
+                raise HTTPException(429, f"LLM call budget used up: {exc}") from exc
+            except Exception as exc:                            # run_live marks the run failed
+                raise HTTPException(502, f"run failed: {type(exc).__name__}: {exc}") from exc
+        return {"run_id": lv.run_id, "papers_kept": lv.papers_kept, "papers_dropped": lv.papers_dropped,
+                "llm_calls": lv.llm_calls, "llm_cache_hits": lv.llm_cache_hits, "network_calls": lv.network_calls}
+
     @app.post("/api/fetch")
     async def fetch(req: FetchRequest) -> dict:
-        if fetch_lock.locked():
-            raise HTTPException(409, "a fetch is already running; wait for it to finish")
-        async with fetch_lock:
+        if job_lock.locked():
+            raise HTTPException(409, "a run or fetch is already in progress; wait for it to finish")
+        async with job_lock:
             try:
                 summary = await fetch_demo(req.query.strip(), settings, retmax=req.retmax, transport=transport)
             except Exception as exc:  # the run row is marked failed by fetch_demo; show the reason
@@ -96,8 +122,13 @@ def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None
             })
         coverage = [{"message": e["message"], "gap_sub_question_ids": json.loads(e["output_refs_json"] or "[]"),
                      "ts": e["ts"]} for e in events if e["stage"] == "coverage"]
+        try:
+            plan = db.get_plan(run_id)
+        except ValueError:            # a plan stored by an older version that no longer validates
+            plan = None
         return {
             "run_id": r["run_id"], "question": r["question"], "status": r["status"], "created_at": r["created_at"],
+            "plan": plan.model_dump(mode="json") if plan else None,
             "counts": counts(run_id),
             "sub_questions": [dict(s) for s in db.query(
                 "SELECT id, text, facet, rationale FROM sub_questions WHERE run_id = ? ORDER BY id", (run_id,))],
@@ -158,7 +189,8 @@ def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None
             "llm_calls": sum(e["event_type"] == "llm_call" for e in events),
             "tokens_in": sum(e["tokens_in"] or 0 for e in events),
             "tokens_out": sum(e["tokens_out"] or 0 for e in events),
-            "cache_hits": sum(e["cache_hit"] for e in events),
+            "cache_hits": sum(e["cache_hit"] for e in events),    # any span (PubMed cache included)
+            "llm_cache_hits": sum(e["cache_hit"] for e in events if e["event_type"] == "llm_call"),
         }}
 
     return app

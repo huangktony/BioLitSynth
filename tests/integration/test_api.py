@@ -1,13 +1,17 @@
 """Read-only dashboard API. Data comes from a real dry run plus one recorded PubMed fixture; each response is
 checked against the store directly, not against answers written alongside the API code."""
+import json
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
 from biolitsynth.api import create_app
 from biolitsynth.graph import run_dry
-from biolitsynth.pubmed import parse_pubmed_xml
+from biolitsynth.pubmed import TokenBucket, parse_pubmed_xml
 from biolitsynth.store import Database
 
+from ..llm_mock import ScriptedClient
 from ..pubmed_mock import CRC_IDS, FakeNcbi, fixture
 
 Q = "Does metformin reduce cancer risk?"
@@ -120,3 +124,56 @@ def test_failed_fetch_is_502_and_the_run_is_marked_failed(fetch_client):
     r = c.post("/api/fetch", json={"query": "metformin"})
     assert r.status_code == 502 and "PubMed fetch failed" in r.json()["detail"]
     assert [row["status"] for row in db.query("SELECT status FROM runs")] == ["failed"]
+
+
+# --- POST /api/runs: question -> Lead plan -> Query Builder -> fetch -> dedup, all offline ---------
+LEAD_FIXTURE = Path(__file__).parents[1] / "fixtures" / "llm" / "lead_live_20261105.json"
+FAST = {"limiters": {"gemini": TokenBucket(10_000)}, "ncbi_limiter": TokenBucket(10_000), "ncbi_env": {}}
+RUN_Q = "Does metformin reduce cancer incidence in type 2 diabetes, and through what mechanisms?"
+
+
+def run_client(settings, clients):
+    ncbi = FakeNcbi()   # default: every query reports len(CRC_IDS) hits, inside the 20-2000 band
+    overrides = {"clients": clients, **FAST} if clients is not None else {}
+    return TestClient(create_app(settings, transport=ncbi.transport, live_overrides=overrides))
+
+
+def test_post_run_plans_builds_queries_and_lists_the_papers(settings):
+    recorded = json.loads(json.loads(LEAD_FIXTURE.read_text())[0]["response_json"])
+    texts = [s["text"] for s in recorded["sub_questions"]]
+    lead = ScriptedClient([("<question>", recorded)])
+    qb = ScriptedClient([(f"(sq{i}): ", {"query_string": f"metformin AND topic{i}", "rationale": "in band"})
+                         for i in range(1, len(texts) + 1)])
+    with run_client(settings, {"lead": lead, "query": qb}) as c:
+        r = c.post("/api/runs", json={"question": RUN_Q})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        db = Database(settings.paths.data_dir / "biolitsynth.db")
+        assert db.get_run(body["run_id"])["status"] == "stopped_after_dedup"
+        detail = c.get(f"/api/runs/{body['run_id']}").json()
+        assert [s["text"] for s in detail["plan"]["sub_questions"]] == texts
+        assert [s["id"] for s in detail["plan"]["sub_questions"]] == [f"sq{i}" for i in range(1, len(texts) + 1)]
+        assert len(detail["queries"]) == len(texts)
+        non_cached = [e for e in db.trace_events(body["run_id"]) if e["event_type"] == "llm_call" and not e["cache_hit"]]
+        assert body["llm_calls"] == len(non_cached) > 0
+        listed = {p["pmid"] for p in c.get(f"/api/runs/{body['run_id']}/papers").json()}
+        assert listed == {r_["pmid"] for r_ in db.run_paper_entries(body["run_id"])} and listed
+        db.close()
+
+
+def test_post_run_rejects_a_short_question_without_creating_a_run(settings):
+    with run_client(settings, {"lead": ScriptedClient([]), "query": ScriptedClient([])}) as c:
+        assert c.post("/api/runs", json={"question": "too short"}).status_code == 422
+        db = Database(settings.paths.data_dir / "biolitsynth.db")
+        assert db.query("SELECT COUNT(*) FROM runs")[0][0] == 0
+        db.close()
+
+
+def test_post_run_without_api_key_is_400_and_creates_no_run(settings, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with run_client(settings, None) as c:
+        r = c.post("/api/runs", json={"question": RUN_Q})
+        assert r.status_code == 400 and "cannot start" in r.json()["detail"]
+        db = Database(settings.paths.data_dir / "biolitsynth.db")
+        assert db.query("SELECT COUNT(*) FROM runs")[0][0] == 0
+        db.close()

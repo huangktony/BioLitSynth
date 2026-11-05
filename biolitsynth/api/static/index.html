@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- Stopgap dashboard over data/biolitsynth.db, with a PubMed search box (P1 fetch). Plain HTML + JS, no build step.
+<!-- Stopgap dashboard over data/biolitsynth.db: ask a question (live run, P2) or fetch one PubMed query (P1). Plain HTML + JS, no build step.
      P7b's React app (plan §16) replaces this page; the /api/* endpoints it calls carry over. -->
 <html lang="en">
 <head>
@@ -61,22 +61,37 @@
   form.search input[name=retmax] { width: 80px; min-height: 40px; padding: 0 8px; border: 1px solid #C9CED6; border-radius: 6px; font: inherit; }
   form.search button { min-height: 40px; padding: 0 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; font-weight: 500; cursor: pointer; }
   form.search button:disabled { opacity: .6; cursor: wait; }
-  #fetch-status { font-size: 13px; margin-top: 8px; min-height: 1em; }
-  #fetch-status.err { color: #8A1C1C; }
+  .status { font-size: 13px; margin: 8px 0 16px; min-height: 1em; }
+  .status.err { color: #8A1C1C; }
+  form.ask textarea { width: 100%; min-height: 64px; padding: 10px 12px; border: 1px solid #C9CED6; border-radius: 6px; font: inherit; resize: vertical; }
+  form.ask { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  form.ask button { min-height: 40px; padding: 0 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; font-weight: 500; cursor: pointer; }
+  form.ask button:disabled { opacity: .6; cursor: wait; }
+  .sq { padding: 10px 0; border-bottom: 1px solid var(--soft); }
+  .sq:last-child { border-bottom: 0; }
+  ol.attempts { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+  ol.attempts li.final { font-weight: 600; }
 </style>
 </head>
 <body>
 <header><div class="in"><b>BioLitSynth</b><span class="muted">dashboard</span>
-  <span class="note">Reads data/biolitsynth.db. Research-question runs need P2; dry runs start from the CLI.</span></div></header>
+  <span class="note">Reads data/biolitsynth.db. Live runs stop after dedup until P3. Dry runs start from the CLI.</span></div></header>
 <div class="wrap">
   <section class="card" style="flex: 1 1 100%">
-    <h2>Search PubMed</h2>
+    <h2>Ask a research question</h2>
+    <form class="ask" id="ask">
+      <textarea name="question" required minlength="15" maxlength="1000" aria-label="Research question"
+        placeholder="e.g. Does metformin reduce cancer incidence in patients with type 2 diabetes, and through what mechanisms?"></textarea>
+      <button type="submit">Start research</button>
+    </form>
+    <div id="ask-status" class="status muted">The Lead plans sub-questions, the Query Builder writes and refines PubMed searches, then papers are fetched and deduplicated. Uses about 4 to 10 LLM calls; repeats come from the cache.</div>
+    <h2>Or search PubMed directly</h2>
     <form class="search" id="search">
       <input name="query" required minlength="3" placeholder="PubMed syntax, e.g. metformin AND colorectal neoplasms[mh] AND humans[mh]" aria-label="PubMed query">
       <label class="muted">top <input name="retmax" type="number" min="1" max="200" value="25" aria-label="Number of papers"></label>
       <button type="submit">Fetch papers</button>
     </form>
-    <div id="fetch-status" class="muted">Runs a real esearch + efetch + dedup and stores the papers as a new run. Repeat queries come from the cache.</div>
+    <div id="fetch-status" class="status muted">Runs a real esearch + efetch + dedup and stores the papers as a new run. Repeat queries come from the cache.</div>
   </section>
   <aside class="card"><h2>Runs</h2><div id="runs"><p class="empty">Loading…</p></div></aside>
   <main id="main"><div class="card empty">Pick a run.</div></main>
@@ -124,8 +139,10 @@ async function show(runId) {
         ["Evidence", c.evidence, "extractor lands in P3"],
         ["Claims", c.claims, `${c.synth_attempts} synth attempt(s)`],
         ["Gap rounds", c.gap_rounds, "extra coverage rounds"],
-        ["Trace events", c.trace_events, `${trace.totals.llm_calls} LLM calls`],
+        ["LLM calls", trace.totals.llm_calls - trace.totals.llm_cache_hits, `${trace.totals.llm_cache_hits} from cache · ${trace.totals.tokens_in + trace.totals.tokens_out} tokens`],
+        ["Trace events", c.trace_events, "spans in SQLite"],
       ].map(([l, v, n]) => $("div", { class: "kpi" }, $("span", {}, l), $("b", { class: "mono" }, v), $("span", {}, n))))),
+    d.plan ? planCard(d.plan) : document.createDocumentFragment(),
     $("section", { class: "card" }, $("h2", {}, "Pipeline"),
       $("ol", { class: "stages" }, d.stages.map((s) =>
         $("li", { class: s.failures ? "fail" : s.retries ? "warn" : "" },
@@ -140,12 +157,33 @@ async function show(runId) {
           d.queries.length ? $("ul", { class: "plain" }, d.queries.map((q) => $("li", {},
             $("div", { class: "row" }, $("span", { class: "mono muted" }, `${q.id} → ${q.sub_question_id}`),
               $("span", { class: "muted" }, `${q.hit_count ?? "?"} hits${q.round ? ` · gap round ${q.round}` : ""}${q.refinement_history.length > 1 ? ` · refined ${q.refinement_history.length - 1}×` : ""}`)),
-            $("div", { class: "mono" }, q.query_string)))) : empty("No queries stored.")),
+            $("div", { class: "mono" }, q.query_string),
+            q.refinement_history.length > 1 ? $("ol", { class: "attempts mono" }, q.refinement_history.map(([qs, hits]) =>
+              $("li", { class: qs === q.query_string ? "final" : "" }, `${hits} hits: ${qs}`))) : null))) : empty("No queries stored.")),
         $("section", { class: "card" }, $("h2", {}, "Coverage"),
           d.coverage.length ? $("ul", { class: "plain" }, d.coverage.map((g) => $("li", {}, g.message,
             g.gap_sub_question_ids.length ? $("div", { class: "mono muted" }, g.gap_sub_question_ids.join(", ")) : null)))
             : empty("No coverage step in this run.")),
         traceCard(trace))));
+}
+
+function planCard(plan) {
+  if (!plan) return null;
+  const facet = (f) => $("span", { class: "tag" }, f.replace("_", " "));
+  return $("section", { class: "card" }, $("h2", {}, `Plan (${plan.effort}, ${plan.sub_questions.length} sub-questions)`),
+    plan.sub_questions.map((sq) => $("div", { class: "sq" },
+      $("div", { class: "row" }, $("span", {}, $("span", { class: "mono muted" }, sq.id + " "), sq.text), facet(sq.facet)),
+      sq.key_concepts.length ? $("div", { class: "muted" }, "Key concepts: " + sq.key_concepts.join(" · ")) : null,
+      sq.rationale ? $("div", { class: "muted" }, sq.rationale) : null)),
+    plan.bridges.length ? $("div", {}, $("h2", { style: "margin-top:12px" }, "Bridges"),
+      $("ul", { class: "plain" }, plan.bridges.map((b) => $("li", {},
+        $("span", { class: "mono muted" }, `${b.id} ${b.from_sub_question_id} → ${b.to_sub_question_id}  `), b.hypothesis)))) : null,
+    plan.out_of_scope_notes.length ? $("div", { class: "muted", style: "margin-top:8px" },
+      "Out of scope: " + plan.out_of_scope_notes.join(" · ")) : null);
+}
+
+function errText(body) {
+  return typeof body.detail === "string" ? body.detail : body.detail.map((d) => d.msg).join("; ");
 }
 
 function claimsCard(claims) {
@@ -192,15 +230,35 @@ function traceCard(trace) {
       $("span", { class: "muted" }, `${e.latency_ms ?? 0} ms`)))));
 }
 
+document.getElementById("ask").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const form = ev.target, btn = form.querySelector("button"), status = document.getElementById("ask-status");
+  btn.disabled = true; status.className = "status muted";
+  status.textContent = "Planning, writing searches, fetching papers… this can take a minute on the free tier.";
+  try {
+    const r = await fetch("/api/runs", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: form.question.value }) });
+    const body = await r.json();
+    if (!r.ok) throw new Error(errText(body));
+    status.textContent = `${body.papers_kept} papers kept after dedup (${body.papers_dropped} dropped). ` +
+      `${body.llm_calls} LLM call(s), ${body.llm_cache_hits} from cache, ${body.network_calls} NCBI call(s).`;
+    current = null;
+    await show(body.run_id);
+  } catch (err) {
+    status.className = "status err"; status.textContent = String(err.message || err);
+    loadRuns();
+  } finally { btn.disabled = false; }
+};
+
 document.getElementById("search").onsubmit = async (ev) => {
   ev.preventDefault();
   const form = ev.target, btn = form.querySelector("button"), status = document.getElementById("fetch-status");
-  btn.disabled = true; status.className = "muted"; status.textContent = "Fetching from PubMed…";
+  btn.disabled = true; status.className = "status muted"; status.textContent = "Fetching from PubMed…";
   try {
     const r = await fetch("/api/fetch", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: form.query.value, retmax: Number(form.retmax.value) }) });
     const body = await r.json();
-    if (!r.ok) throw new Error(typeof body.detail === "string" ? body.detail : body.detail.map((d) => d.msg).join("; "));
+    if (!r.ok) throw new Error(errText(body));
     status.textContent = `${body.total_hits} hits on PubMed, took top ${body.candidates}: ${body.stored} stored ` +
       `(${body.skipped_no_abstract} without abstract), ${body.kept} kept after dedup` +
       `${body.dropped.length ? `, dropped ${body.dropped.map(([p, why]) => `${p} (${why})`).join(", ")}` : ""}. ` +
@@ -208,7 +266,7 @@ document.getElementById("search").onsubmit = async (ev) => {
     current = null;
     await show(body.run_id);
   } catch (err) {
-    status.className = "err"; status.textContent = String(err.message || err);
+    status.className = "status err"; status.textContent = String(err.message || err);
     loadRuns();
   } finally { btn.disabled = false; }
 };
