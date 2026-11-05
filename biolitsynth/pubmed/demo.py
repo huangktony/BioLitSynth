@@ -50,6 +50,9 @@ async def fetch_demo(query: str, settings: Settings, *, retmax: int = 25,
             skipped_no_abstract=sum(s.reason == "no_abstract" for s in got.fetch.skipped),
             dropped=[(d.pmid, d.reason) for d in result.dropped], cache_hits=got.fetch.cache_hits,
             network_calls=client.network_calls, search_cached=got.search.cached)
+    except BaseException:
+        db.set_run_status(run_id, "failed")
+        raise
     finally:
         if client:
             await client.aclose()

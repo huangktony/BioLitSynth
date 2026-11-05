@@ -1,17 +1,23 @@
-"""Read-only dashboard API over the SQLite store (a slice of plan §16.3: the GET endpoints only).
+"""Dashboard API over the SQLite store: the GET endpoints of plan §16.3, plus POST /api/fetch.
 
-No run creation, SSE, or approval yet; those arrive in P7a. The page in static/ is a stopgap that P7b's
-React app replaces. Endpoints only read: nothing here writes to the database.
+POST /api/fetch runs the P1 fetch demo (one hand-written PubMed query) from the browser; it is the only
+endpoint that writes, and only through `fetch_demo`. Research-question runs, SSE and approval arrive in P7a.
+The page in static/ is a stopgap that P7b's React app replaces.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from dataclasses import asdict
 from importlib import resources
-from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 
+from ..config import Settings
+from ..pubmed.demo import fetch_demo
 from ..store import Database
 
 # Display order for the pipeline panel (graph order, plan §3).
@@ -19,11 +25,18 @@ STAGE_ORDER = ["plan", "query", "approve_queries", "fetch", "dedup", "rerank", "
                "normalize_terms", "conflict", "synthesize", "cite", "check", "critique", "route", "assemble"]
 
 
-def create_app(db_path: str | Path) -> FastAPI:
-    db = Database(db_path)
-    app = FastAPI(title="BioLitSynth dashboard (read-only)")
+class FetchRequest(BaseModel):
+    query: str = Field(min_length=3, max_length=1000)   # PubMed syntax, e.g. "metformin AND colorectal neoplasms[mh]"
+    retmax: int = Field(25, ge=1, le=200)
+
+
+def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+    """`transport` swaps in a fake NCBI for tests."""
+    db = Database(settings.paths.data_dir / "biolitsynth.db")
+    app = FastAPI(title="BioLitSynth dashboard")
     app.state.db = db
     app.router.on_shutdown.append(db.close)
+    fetch_lock = asyncio.Lock()   # one fetch at a time, so two clicks cannot double the request rate to NCBI
 
     def run_or_404(run_id: str):
         row = db.get_run(run_id)
@@ -47,6 +60,17 @@ def create_app(db_path: str | Path) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
         return resources.files("biolitsynth.api").joinpath("static/index.html").read_text()
+
+    @app.post("/api/fetch")
+    async def fetch(req: FetchRequest) -> dict:
+        if fetch_lock.locked():
+            raise HTTPException(409, "a fetch is already running; wait for it to finish")
+        async with fetch_lock:
+            try:
+                summary = await fetch_demo(req.query.strip(), settings, retmax=req.retmax, transport=transport)
+            except Exception as exc:  # the run row is marked failed by fetch_demo; show the reason
+                raise HTTPException(502, f"PubMed fetch failed: {type(exc).__name__}: {exc}") from exc
+        return asdict(summary)
 
     @app.get("/api/runs")
     def list_runs() -> list[dict]:

@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- Stopgap read-only dashboard over data/biolitsynth.db. Plain HTML + JS, no build step.
+<!-- Stopgap dashboard over data/biolitsynth.db, with a PubMed search box (P1 fetch). Plain HTML + JS, no build step.
      P7b's React app (plan §16) replaces this page; the /api/* endpoints it calls carry over. -->
 <html lang="en">
 <head>
@@ -56,12 +56,28 @@
   .empty { color: var(--muted); font-style: italic; }
   .scroll { max-height: 420px; overflow: auto; }
   a { color: var(--accent); }
+  form.search { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  form.search input[name=query] { flex: 1 1 420px; min-height: 40px; padding: 0 12px; border: 1px solid #C9CED6; border-radius: 6px; font: inherit; }
+  form.search input[name=retmax] { width: 80px; min-height: 40px; padding: 0 8px; border: 1px solid #C9CED6; border-radius: 6px; font: inherit; }
+  form.search button { min-height: 40px; padding: 0 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; font-weight: 500; cursor: pointer; }
+  form.search button:disabled { opacity: .6; cursor: wait; }
+  #fetch-status { font-size: 13px; margin-top: 8px; min-height: 1em; }
+  #fetch-status.err { color: #8A1C1C; }
 </style>
 </head>
 <body>
-<header><div class="in"><b>BioLitSynth</b><span class="muted">read-only dashboard</span>
-  <span class="note">Reads data/biolitsynth.db. Start runs from the CLI.</span></div></header>
+<header><div class="in"><b>BioLitSynth</b><span class="muted">dashboard</span>
+  <span class="note">Reads data/biolitsynth.db. Research-question runs need P2; dry runs start from the CLI.</span></div></header>
 <div class="wrap">
+  <section class="card" style="flex: 1 1 100%">
+    <h2>Search PubMed</h2>
+    <form class="search" id="search">
+      <input name="query" required minlength="3" placeholder="PubMed syntax, e.g. metformin AND colorectal neoplasms[mh] AND humans[mh]" aria-label="PubMed query">
+      <label class="muted">top <input name="retmax" type="number" min="1" max="200" value="25" aria-label="Number of papers"></label>
+      <button type="submit">Fetch papers</button>
+    </form>
+    <div id="fetch-status" class="muted">Runs a real esearch + efetch + dedup and stores the papers as a new run. Repeat queries come from the cache.</div>
+  </section>
   <aside class="card"><h2>Runs</h2><div id="runs"><p class="empty">Loading…</p></div></aside>
   <main id="main"><div class="card empty">Pick a run.</div></main>
 </div>
@@ -175,6 +191,27 @@ function traceCard(trace) {
         e.message ? $("div", { class: "muted", style: "font-family:inherit" }, e.message) : null),
       $("span", { class: "muted" }, `${e.latency_ms ?? 0} ms`)))));
 }
+
+document.getElementById("search").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const form = ev.target, btn = form.querySelector("button"), status = document.getElementById("fetch-status");
+  btn.disabled = true; status.className = "muted"; status.textContent = "Fetching from PubMed…";
+  try {
+    const r = await fetch("/api/fetch", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: form.query.value, retmax: Number(form.retmax.value) }) });
+    const body = await r.json();
+    if (!r.ok) throw new Error(typeof body.detail === "string" ? body.detail : body.detail.map((d) => d.msg).join("; "));
+    status.textContent = `${body.total_hits} hits on PubMed, took top ${body.candidates}: ${body.stored} stored ` +
+      `(${body.skipped_no_abstract} without abstract), ${body.kept} kept after dedup` +
+      `${body.dropped.length ? `, dropped ${body.dropped.map(([p, why]) => `${p} (${why})`).join(", ")}` : ""}. ` +
+      `${body.network_calls} network call(s)${body.search_cached ? ", search cached" : ""}.`;
+    current = null;
+    await show(body.run_id);
+  } catch (err) {
+    status.className = "err"; status.textContent = String(err.message || err);
+    loadRuns();
+  } finally { btn.disabled = false; }
+};
 
 loadRuns().catch((err) => document.getElementById("runs").replaceChildren(empty(String(err))));
 </script>

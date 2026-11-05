@@ -8,7 +8,7 @@ from biolitsynth.graph import run_dry
 from biolitsynth.pubmed import parse_pubmed_xml
 from biolitsynth.store import Database
 
-from ..pubmed_mock import fixture
+from ..pubmed_mock import CRC_IDS, FakeNcbi, fixture
 
 Q = "Does metformin reduce cancer risk?"
 
@@ -22,7 +22,7 @@ async def client(settings):
     db.upsert_paper(paper)
     db.add_run_papers(s.run_id, "q1", [(paper.pmid, 1)])
     db.close()
-    with TestClient(create_app(db_path)) as c:
+    with TestClient(create_app(settings)) as c:
         yield c, s, paper, Database(db_path)
 
 
@@ -78,3 +78,45 @@ def test_api_never_writes(client):
                  f"/api/runs/{s.run_id}/claims", f"/api/runs/{s.run_id}/trace"):
         assert c.get(path).status_code == 200
     assert {t: db.query(f"SELECT COUNT(*) FROM {t}")[0][0] for t in tables} == before
+
+
+# --- POST /api/fetch: the P1 fetch demo from the browser, against the fake NCBI --------------------
+@pytest.fixture
+def fetch_client(settings):
+    ncbi = FakeNcbi()
+    with TestClient(create_app(settings, transport=ncbi.transport)) as c:
+        yield c, ncbi, Database(settings.paths.data_dir / "biolitsynth.db")
+
+
+def test_fetch_creates_a_run_whose_papers_the_dashboard_lists(fetch_client):
+    c, ncbi, db = fetch_client
+    r = c.post("/api/fetch", json={"query": "metformin AND colorectal neoplasms[mh]", "retmax": 25})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["candidates"] == len(CRC_IDS[:25])
+    assert db.get_run(body["run_id"])["status"] == "completed_fetch_demo"
+    stored = {row["pmid"] for row in db.run_paper_entries(body["run_id"])}
+    assert len(stored) == body["stored"] > 0
+    assert set(ncbi.fetched_ids()) >= stored                     # every stored paper came from efetch
+    listed = c.get(f"/api/runs/{body['run_id']}/papers").json()
+    assert {p["pmid"] for p in listed} == stored
+    assert [r["run_id"] for r in c.get("/api/runs").json()][0] == body["run_id"]   # newest first
+
+    again = c.post("/api/fetch", json={"query": "metformin AND colorectal neoplasms[mh]", "retmax": 25}).json()
+    assert again["network_calls"] == 0 and again["search_cached"]
+
+
+@pytest.mark.parametrize("payload", [{"query": ""}, {"query": "ab"}, {"query": "metformin", "retmax": 0},
+                                     {"query": "metformin", "retmax": 201}, {}])
+def test_fetch_rejects_bad_input_without_calling_ncbi(fetch_client, payload):
+    c, ncbi, db = fetch_client
+    assert c.post("/api/fetch", json=payload).status_code == 422
+    assert ncbi.requests == [] and db.query("SELECT COUNT(*) FROM runs")[0][0] == 0
+
+
+def test_failed_fetch_is_502_and_the_run_is_marked_failed(fetch_client):
+    c, ncbi, db = fetch_client
+    ncbi.esearch_override = {"not": "an esearch response"}
+    r = c.post("/api/fetch", json={"query": "metformin"})
+    assert r.status_code == 502 and "PubMed fetch failed" in r.json()["detail"]
+    assert [row["status"] for row in db.query("SELECT status FROM runs")] == ["failed"]
