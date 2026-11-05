@@ -2,7 +2,7 @@
 # TODO(P2): replace the placeholders after checking AI Studio / build.nvidia.com by hand.
 models:
   lead:        {provider: gemini,        model: TODO-verify-gemini-flash}
-  query:       {provider: gemini,        model: TODO-verify-gemini-flash}
+  query:       {provider: gemini,        model: gemini-3.8-flash}   # verified via models.list 2026-11-05
   extractor:   {provider: gemini,        model: TODO-verify-gemini-flash-lite}
   normalizer:  {provider: gemini,        model: TODO-verify-gemini-flash}
   conflict:    {provider: gemini,        model: TODO-verify-gemini-flash}

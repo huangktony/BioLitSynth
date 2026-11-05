@@ -137,9 +137,18 @@ Decided in code (the plan is silent or loose):
 31. **Each refinement costs one extra esearch** (count-only, `retmax=0`), cached 7 days like every esearch.
 
 Still open:
-- **No live check yet.** `config.yaml` still has `TODO-verify-*` model ids and no `GEMINI_API_KEY` is set, so the
-  Query Builder has only run against scripted replies. A person should run one live question, then record its
-  replies as fixtures (`tests/fixtures/llm/`).
+- **Live check done 2026-11-05** with `gemini-3.8-flash` (picked from `models.list` as the newest stable Flash;
+  `models.query` only, the other roles still hold placeholders). Results:
+  - metformin/CRC, 2 sub-questions: both queries valid, all key concepts present, in band on the first draft
+    (563 and 62 hits), 126 papers kept after dedup. Rerun: 0 LLM calls, 0 NCBI calls.
+  - broad "effects of metformin": narrowed twice (3,898 → 3,617 → 2,183) and stopped at the cap just above the
+    band; code kept the closest attempt as designed. The narrowing steps were weak (one swapped MeSH for `[ti]`),
+    which is a D2 question for BioASQ, not something to tune by eye.
+  - PubMed's own order for the "trials" query puts reviews and other-cancer trials near the top: the case for the
+    P3 rerank (D4), to be measured, not assumed.
+  - 6 replies recorded in `tests/fixtures/llm/query_builder_live_20261105.json`.
+- **`providers.gemini.rpm: 10` is still a guess.** Check the free-tier limit for `gemini-3.8-flash` on AI Studio.
+- **Rotate the Gemini and NCBI keys**: they were pasted into a chat session during the live check.
 - **P2 acceptance is not met**: it needs the Lead's plan call (golden Q1 → 3 sub-questions with distinct facets),
   and §11.5 asks for D1-D2 on BioASQ dev, which needs the BioASQ subset and the retrieval-only eval.
 - The scripted LLM replies in the tests were written by the coding agent. They are inputs (what a model might

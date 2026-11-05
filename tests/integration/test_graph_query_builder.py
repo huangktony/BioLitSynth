@@ -84,6 +84,7 @@ async def test_run_budget_stops_the_run(settings):
 
 
 async def test_placeholder_model_fails_before_any_run_is_created(settings):
+    settings.models.query.model = "TODO-verify-gemini-flash"
     with pytest.raises(ModelNotVerified):
         await run_live(QUESTION, SUBQ, settings, ncbi_env={})
     assert not (settings.paths.data_dir / "biolitsynth.db").exists()
