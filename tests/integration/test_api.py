@@ -204,6 +204,7 @@ def _eval_app(settings, tmp_path, dev="[d1]", **over):
           "llm_limiter": TokenBucket(10_000), "ncbi_limiter": TokenBucket(10_000),
           "client": ScriptedClient([("colorectal cancer risk?\nFacet", {"query_string": EV_DRAFT, "rationale": "r"}),
                                     ("Broaden it", {"query_string": EV_FINAL, "rationale": "r"})])}
+    ov.setdefault("log_path", tmp_path / "eval_log.jsonl")
     ov.update(over)
     return create_app(settings, eval_overrides=ov)
 
@@ -277,3 +278,45 @@ def test_eval_subset_reflects_the_file(settings, tmp_path):
     with TestClient(_eval_app(settings, tmp_path, bioasq_path=tmp_path / "x.json", subset_path=tmp_path / "x.yaml")) as c:
         s = c.get("/api/eval/subset").json()
         assert (s["source_present"], s["subset_present"], s["dev"]) == (False, False, 0)
+
+
+# ---- committed eval log ----
+
+def test_post_eval_appends_one_log_line_and_the_endpoint_returns_it(settings, tmp_path):
+    log = tmp_path / "eval_log.jsonl"
+    with TestClient(_eval_app(settings, tmp_path)) as c:
+        assert c.get("/api/eval/log").json() == []
+        body = c.post("/api/evals", json={"limit": 5}).json()
+        lines = log.read_text().splitlines()
+        assert len(lines) == 1
+        rec = json.loads(lines[0])
+        assert rec["eval_id"] == body["eval_id"] and rec["summary"] == body["summary"]
+        assert rec["question_ids"] == ["d1"] and rec["config_hash"] and "metformin" not in lines[0]
+        assert c.get("/api/eval/log").json() == [rec]
+
+
+def test_failed_eval_writes_no_log_line(settings, tmp_path, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    log = tmp_path / "eval_log.jsonl"
+    with TestClient(_eval_app(settings, tmp_path, client=None)) as c:
+        assert c.post("/api/evals", json={"limit": 1}).status_code == 400
+    with TestClient(_eval_app(settings, tmp_path, client=ScriptedClient([]))) as c:     # script runs out mid-eval
+        assert c.post("/api/evals", json={"limit": 1}).status_code == 502
+    assert not log.exists()
+
+
+def test_eval_log_is_newest_first(settings, tmp_path):
+    log = tmp_path / "eval_log.jsonl"
+    old = {"eval_id": "eval_1", "date": "2026-01-01T00:00:00+00:00"}
+    new = {"eval_id": "eval_2", "date": "2026-02-01T00:00:00+00:00"}
+    log.write_text(json.dumps(old) + "\n" + json.dumps(new) + "\n")
+    with TestClient(_eval_app(settings, tmp_path)) as c:
+        assert [r["eval_id"] for r in c.get("/api/eval/log").json()] == ["eval_2", "eval_1"]
+
+
+def test_eval_questions_reads_the_local_source_only(settings, tmp_path):
+    with TestClient(_eval_app(settings, tmp_path)) as c:
+        assert c.get("/api/eval/questions", params={"ids": "d1,zzz"}).json() == {
+            "d1": "Does metformin lower colorectal cancer risk?"}
+    with TestClient(_eval_app(settings, tmp_path, bioasq_path=tmp_path / "x.json")) as c:
+        assert c.get("/api/eval/questions", params={"ids": "d1"}).json() == {}

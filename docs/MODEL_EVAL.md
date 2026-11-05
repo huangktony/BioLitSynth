@@ -3,6 +3,10 @@
 One section per decision id. Each records the options, the data, the numbers, and what the pre-registered rule says.
 A decision is final only when the team confirms it. Rows not yet run are `untested` and keep their default.
 
+Every eval run also appends one machine-written line to `docs/eval_log.jsonl` (question ids, model, prompt
+version and hash, config hash, git commit, summary and per-question recall; no BioASQ text). The dashboard's
+Eval tab (History card) reads it. That log is the raw record; this file is where decisions are written up.
+
 | ID | Status |
 |---|---|
 | D1 | untested (needs golden-question anchor PMIDs) |

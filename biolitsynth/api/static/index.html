@@ -74,6 +74,8 @@
   nav.tabs { display: flex; gap: 4px; margin-left: 16px; }
   nav.tabs button { border: 0; background: transparent; padding: 8px 14px; border-radius: 6px; cursor: pointer; font: inherit; font-weight: 500; color: var(--muted); }
   nav.tabs button[aria-pressed=true] { background: var(--soft); color: var(--ink); }
+  td.up { background: #E1F3E4; color: #17622B; }
+  td.down { background: #FBE4E4; color: #8A1C1C; }
   .amber { background: #FDF1DC; color: #6B3A06; border-radius: 6px; padding: 8px 12px; margin-top: 10px; }
   form.evalrun { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   form.evalrun input[name=limit] { width: 80px; min-height: 40px; padding: 0 8px; border: 1px solid #C9CED6; border-radius: 6px; font: inherit; }
@@ -115,6 +117,12 @@
       <button type="submit">Run retrieval eval (dev)</button>
     </form>
     <div id="eval-status" class="status muted">Uses 1 to 3 LLM calls per question. Held-back questions are never run from here.</div>
+  </section>
+  <section class="card" style="flex: 1 1 100%">
+    <h2>History</h2>
+    <div id="history"><p class="empty">Loading…</p></div>
+    <h2 style="margin-top:16px">By question</h2>
+    <div id="byq"><p class="empty">Loading…</p></div>
   </section>
   <aside class="card"><h2>Evals</h2><div id="evals"><p class="empty">Loading…</p></div></aside>
   <main id="evalmain"><div class="card empty">Pick an eval.</div></main>
@@ -305,7 +313,7 @@ function setTab(name) {
   document.getElementById("evalpane").classList.toggle("hidden", name !== "eval");
   document.getElementById("tab-research").setAttribute("aria-pressed", String(name === "research"));
   document.getElementById("tab-eval").setAttribute("aria-pressed", String(name === "eval"));
-  if (name === "eval" && !evalLoaded) { evalLoaded = true; loadSubset(); loadEvals(); }
+  if (name === "eval" && !evalLoaded) { evalLoaded = true; loadSubset(); loadHistory(); loadEvals(); }
 }
 document.getElementById("tab-research").onclick = () => setTab("research");
 document.getElementById("tab-eval").onclick = () => setTab("eval");
@@ -325,6 +333,45 @@ async function loadSubset() {
       s.subset_present && !s.reviewed_by ? $("div", { class: "amber" },
         "Subset not reviewed yet: a person reviews tests/golden/bioasq_subset.yaml and sets reviewed_by before tuning") : null);
   } catch (err) { box.replaceChildren(empty(String(err))); }
+}
+
+async function loadHistory() {
+  const hist = document.getElementById("history"), byq = document.getElementById("byq");
+  try {
+    const log = await api("/api/eval/log");
+    if (!log.length) { fill(hist, empty("No evals logged yet (docs/eval_log.jsonl).")); fill(byq, empty("Nothing to compare yet.")); return; }
+    const td = (...k) => $("td", { class: "mono" }, ...k);
+    const heads = ["Date", "Eval", "n", "Model", "Prompt", "Prompt hash", "Config hash", "Git", "Recall final", "Recall draft",
+      "In band", "Misses beyond cap / not matched", "LLM calls"];
+    fill(hist, $("div", { class: "scroll", style: "max-height:none" }, $("table", {},
+      $("thead", {}, $("tr", {}, heads.map((h) => $("th", {}, h)))),
+      $("tbody", {}, log.map((r) => {
+        const s = r.summary;
+        return $("tr", {}, td((r.date || "n/a").replace("T", " ").replace("+00:00", "Z")), td(r.eval_id), td(r.n_questions), td(r.model),
+          td(r.prompt_version), td((r.prompt_hash || "").slice(0, 8)), td(r.config_hash),
+          td(r.git_commit || "n/a", r.git_dirty ? " dirty" : ""),
+          td(pct(s.mean_recall_fetch)), td(pct(s.mean_recall_fetch_draft)), td(pct(s.share_in_band)),
+          td(`${s.misses_beyond_cap} / ${s.misses_not_matched}`), td(num(s.llm_calls)));
+      })))));
+    // By question: rows = ids in any logged eval, columns = evals newest first.
+    const ids = [...new Set(log.flatMap((r) => r.question_ids))];
+    let text = {};
+    try { text = await api(`/api/eval/questions?ids=${encodeURIComponent(ids.join(","))}`); } catch (e) { text = {}; }
+    const cell = (id, i) => {
+      const cur = log[i].per_question[id];
+      if (!cur) return $("td", {});
+      const prev = log.slice(i + 1).map((r) => r.per_question[id]).find((x) => x);   // the previous eval (older) that had it
+      const d = prev ? cur.recall_fetch - prev.recall_fetch : 0;
+      const arrow = d > 1e-9 ? " \u2191" : d < -1e-9 ? " \u2193" : "";
+      const cls = d > 1e-9 ? "mono up" : d < -1e-9 ? "mono down" : "mono";
+      return $("td", { class: cls, title: prev ? `previous ${pct(prev.recall_fetch)}` : "first time in the log" }, pct(cur.recall_fetch) + arrow);
+    };
+    fill(byq, $("div", { class: "scroll", style: "max-height:none" }, $("table", {},
+      $("thead", {}, $("tr", {}, $("th", {}, "Question"), log.map((r) => $("th", { class: "mono", title: r.eval_id }, r.eval_id.replace(/^eval_/, "").replace(/_retrieval.*/, ""))))),
+      $("tbody", {}, ids.map((id) => $("tr", {},
+        $("td", {}, text[id] || "(text not available locally)", $("div", { class: "mono muted" }, id)),
+        log.map((_, i) => cell(id, i))))))));
+  } catch (err) { fill(hist, empty(String(err))); fill(byq, empty("")); }
 }
 
 async function loadEvals() {
@@ -390,6 +437,7 @@ document.getElementById("evalform").onsubmit = async (ev) => {
     status.textContent = `${s.questions} questions: recall@fetch ${pct(s.mean_recall_fetch)} (draft ${pct(s.mean_recall_fetch_draft)}). ` +
       `${s.llm_calls} LLM call(s), ${s.ncbi_calls} NCBI call(s).`;
     currentEval = null;
+    loadHistory();
     await showEval(body.eval_id);
   } catch (err) {
     status.className = "status err"; status.textContent = String(err.message || err);

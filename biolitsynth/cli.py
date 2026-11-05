@@ -49,6 +49,10 @@ def main(argv: list[str] | None = None) -> int:
     ret.add_argument("--prompt-version", type=int, default=None,
                      help="Query Builder prompt version to evaluate (default: config.yaml prompt_versions, else latest)")
     ret.add_argument("--config", default=None, help="path to config.yaml")
+    ret.add_argument("--log", default="docs/eval_log.jsonl", help="committed eval log to append to")
+    bf = evs.add_parser("backfill-log", help="append completed evals from the store to the eval log if absent")
+    bf.add_argument("--config", default=None, help="path to config.yaml")
+    bf.add_argument("--log", default="docs/eval_log.jsonl")
     serve = sub.add_parser("serve", help="dashboard over the run store, with a PubMed search box, at http://127.0.0.1:<port>")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--config", default=None, help="path to config.yaml")
@@ -121,6 +125,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def _eval(args) -> int:
     from .eval.bioasq import load_bioasq, load_subset, select_subset, write_subset
+    if args.eval_cmd == "backfill-log":
+        from .eval.log import backfill
+        added = backfill(load_settings(args.config), args.log)
+        print(f"appended {len(added)} eval(s) to {args.log}: {added}")
+        return 0
+
     questions = load_bioasq(args.bioasq)
     if args.eval_cmd == "select":
         exclude = {i for f in args.exclude for s in [load_subset(f)] for i in s["dev"] + s["held_back"]}
@@ -132,6 +142,7 @@ def _eval(args) -> int:
         print("A person reviews the list and sets reviewed_by before any tuning.")
         return 0
 
+    from .eval.log import append_log, record_from_report, run_config_json
     from .eval.retrieval import run_retrieval_eval
     from .graph.runner import resolve_clients
     from .llm import MissingApiKey, ModelNotVerified
@@ -154,9 +165,11 @@ def _eval(args) -> int:
         return 2
     report, path = asyncio.run(run_retrieval_eval([questions[i] for i in ids], settings, split=args.split,
                                                   client=client, max_llm_calls=args.max_llm_calls))
+    append_log(record_from_report(report, settings, config_json=run_config_json(settings, report.eval_id)), args.log)
     for k, v in report.summary().items():
         print(f"{k:<26}{v}")
     print(f"{'details':<26}{path}")
+    print(f"{'logged to':<26}{args.log}")
     return 0
 
 

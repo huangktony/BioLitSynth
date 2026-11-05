@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from ..config import Settings
 from ..eval.bioasq import load_bioasq, load_subset
+from ..eval.log import DEFAULT_LOG, append_log, read_log, record_from_report, run_config_json
 from ..eval.retrieval import run_retrieval_eval
 from ..graph.runner import resolve_clients, run_live
 from ..llm import BudgetExceeded, MissingApiKey, ModelNotVerified
@@ -57,6 +58,7 @@ def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None
     ev = dict(eval_overrides or {})
     bioasq_path = Path(ev.pop("bioasq_path", None) or settings.paths.data_dir / "eval" / "bioasq" / "training14b.json")
     subset_path = Path(ev.pop("subset_path", None) or "tests/golden/bioasq_subset.yaml")
+    log_path = Path(ev.pop("log_path", None) or DEFAULT_LOG)
     job_lock = asyncio.Lock()     # one run or fetch at a time (shared LLM quota and NCBI rate limit)
 
     def run_or_404(run_id: str):
@@ -129,6 +131,18 @@ def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None
                        held_back=len(sub.get("held_back") or []))
         return out
 
+    @app.get("/api/eval/log")
+    def eval_log() -> list[dict]:
+        return sorted(read_log(log_path), key=lambda r: (r.get("date") or "", r["eval_id"]), reverse=True)
+
+    @app.get("/api/eval/questions")
+    def eval_questions(ids: str = "") -> dict:
+        """Question text for the given ids, from the local BioASQ file only. Never written to the committed log."""
+        if not bioasq_path.exists():
+            return {}
+        qs = load_bioasq(bioasq_path)
+        return {i: qs[i].body for i in ids.split(",") if i in qs}
+
     @app.get("/api/evals")
     def list_evals() -> list[dict]:
         rows = db.query("SELECT run_id, question, status, created_at FROM runs WHERE run_id LIKE 'eval\\_%' ESCAPE '\\' "
@@ -171,6 +185,8 @@ def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None
                                                      client=client, max_llm_calls=3 * req.limit, **extra)
             except Exception as exc:                              # run_retrieval_eval marks the run failed
                 raise HTTPException(502, f"eval failed: {type(exc).__name__}: {exc}") from exc
+            append_log(record_from_report(report, settings, config_json=run_config_json(settings, report.eval_id)),
+                       log_path)
         return {"eval_id": report.eval_id, "summary": report.summary()}
 
     @app.get("/api/runs/{run_id}")
