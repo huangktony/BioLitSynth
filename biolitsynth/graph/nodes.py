@@ -86,6 +86,7 @@ def build_query_builder(deps: Deps):
 
     band = deps.settings.query_band
     max_ref = deps.settings.limits.query_refinement_attempts
+    qb_version = deps.settings.prompt_versions.get(qbuild.PROMPT)
     tr = deps.tracer
 
     async def draft(s: QBState) -> dict:
@@ -95,7 +96,7 @@ def build_query_builder(deps: Deps):
                 qs = f"[dry] ({s['sub_question_id']} concepts)"
             else:
                 qs = await qbuild.draft_query(deps.sub_question(s["sub_question_id"]), deps.llm("query"), band,
-                                              parent=sp.span_id)
+                                              version=qb_version, parent=sp.span_id)
             sp.output_refs = [s["query_id"]]
             sp.message = f"{s['query_id']} drafted: {qs[:120]}"
         return {"query_string": qs, "refinements": 0, "history": []}
@@ -121,7 +122,8 @@ def build_query_builder(deps: Deps):
             qs = s["query_string"] + " [refined]"
         else:
             qs = await qbuild.refine_query(deps.sub_question(s["sub_question_id"]), s["history"], deps.llm("query"),
-                                           band, attempt=attempt, max_attempts=max_ref, parent=sid)
+                                           band, attempt=attempt, max_attempts=max_ref, version=qb_version,
+                                           parent=sid)
         return {"refinements": attempt, "query_string": qs}
 
     async def finalize(s: QBState) -> dict:
@@ -178,7 +180,9 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
                 p, how = deps.manual_plan, "given by hand"
             else:
                 built = await lead_agent.plan_question(deps.run_id, state["question"], deps.llm("lead"),
-                                                       max_sub_questions=st.limits.sub_questions, parent=sp.span_id)
+                                                       max_sub_questions=st.limits.sub_questions,
+                                                       version=st.prompt_versions.get(lead_agent.PROMPT),
+                                                       parent=sp.span_id)
                 for w in built.warnings:
                     await tr.event("plan", "lead", "validation", parent=sp.span_id, message=w)
                 p, how = built.plan, "Lead"

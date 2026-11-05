@@ -49,3 +49,11 @@ def test_written_subset_records_the_source_hash_and_needs_review(tmp_path):
     s = load_subset(out)
     assert len(s["source_sha256"]) == 64 and s["reviewed_by"] is None and len(s["dev"]) == 30
     assert "Question" not in out.read_text()                     # ids only: no question text is committed
+
+
+def test_a_check_set_never_overlaps_the_excluded_ids(tmp_path):
+    loaded = load_bioasq(bioasq_file(tmp_path, [q(i) for i in range(100)]))
+    first = select_subset(loaded, seed=0)
+    used = set(first["dev"] + first["held_back"])
+    check = select_subset(loaded, n=30, dev=30, seed=1, exclude=used)
+    assert len(check["dev"]) == 30 and check["held_back"] == [] and not used & set(check["dev"])

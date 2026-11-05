@@ -47,12 +47,15 @@ def file_sha256(path: str | Path) -> str:
 
 
 def select_subset(questions: dict[str, BioasqQuestion], *, n: int = 50, dev: int = 30, seed: int = 0,
-                  min_relevant: int = 5, types: tuple[str, ...] = TYPES) -> dict:
-    eligible = sorted(q.id for q in questions.values() if q.type in types and len(q.relevant_pmids) >= min_relevant)
+                  min_relevant: int = 5, types: tuple[str, ...] = TYPES, exclude: set[str] = frozenset()) -> dict:
+    """`exclude`: ids already used by another subset (a check set must never overlap dev or held-back)."""
+    eligible = sorted(q.id for q in questions.values() if q.type in types and len(q.relevant_pmids) >= min_relevant
+                      and q.id not in exclude)
     if len(eligible) < n:
         raise ValueError(f"only {len(eligible)} questions meet the rules, need {n}")
     picked = random.Random(seed).sample(eligible, n)
-    return {"rules": {"types": list(types), "min_relevant_pmids": min_relevant, "n": n, "seed": seed},
+    return {"rules": {"types": list(types), "min_relevant_pmids": min_relevant, "n": n, "seed": seed,
+                      "excluded": len(exclude)},
             "dev": picked[:dev], "held_back": picked[dev:]}
 
 

@@ -7,6 +7,7 @@ A decision is final only when the team confirms it. Rows not yet run are `untest
 |---|---|
 | D1 | untested (needs golden-question anchor PMIDs) |
 | D2 | **run, provisional** (subset not yet reviewed by a person) |
+| QB-v2 | **pre-registered 2026-11-05, not yet run** (Query Builder prompt v1 vs v2) |
 | D3-D14 | untested |
 
 ---
@@ -47,3 +48,30 @@ Of 529 relevant PMIDs across the 30 questions:
   and over-narrow first drafts (bisphenol A restricted to `[ti]` fields).
 - BioASQ labels for older questions reflect PubMed at the time they were written; newer papers can outrank them,
   which inflates "beyond cap".
+
+---
+
+## QB-v2: Query Builder prompt v1 vs v2 (pre-registered before v2 was written)
+
+**Why:** a diagnostic on the D2 dev run (NCBI only, no LLM) found that 171 of the 189 relevant PMIDs the final query
+did not match were excluded by a **single** AND-group, usually the question's framing words made into a required
+concept ("function", "definition", "adverse effects"), a title-only field, or a population/design filter the
+question did not need. v2 changes the prompt's rules for those failure **categories**.
+
+**Guards against fitting the dev set:**
+1. v2 is written once. If it fails this rule, the result is recorded and v2 is not adopted. A v3 would need a new,
+   unseen check set.
+2. v2's rules name failure categories, not questions. Its examples do not come from BioASQ.
+3. A fresh **check set** (`tests/golden/bioasq_check.yaml`, 30 questions, seed 1, no overlap with dev or
+   held-back) is drawn and committed **before** v2 exists. The held-back set stays untouched.
+4. `config.yaml` pins `prompt_versions: {query_builder: 1}`; v2 goes live only if the rule below passes.
+
+**Data:** BioASQ dev (30) and the check set (30), `gemini-3.8-flash`, `retmax_candidates` 100, everything else as in D2.
+
+**Rule (all must hold to adopt v2):**
+- (a) mean recall@fetch on **dev** rises by **≥ 3 points** over v1 (v1 dev = 0.288, from the D2 run);
+- (b) mean recall@fetch on the **check set** rises by **≥ 3 points** over v1 on the same check set;
+- (c) at least **90%** of final queries land in the 20-2,000 band on each set;
+- (d) golden Q1 (live, Lead plan) still gives 3 queries in band that each contain every key concept.
+
+If (a) holds but (b) does not, the gain is treated as fitting the dev set and v2 is not adopted.

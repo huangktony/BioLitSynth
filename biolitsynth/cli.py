@@ -34,12 +34,18 @@ def main(argv: list[str] | None = None) -> int:
     sel.add_argument("--bioasq", required=True, help="BioASQ Task B training JSON (keep it under data/eval/bioasq/)")
     sel.add_argument("--out", default="tests/golden/bioasq_subset.yaml")
     sel.add_argument("--seed", type=int, default=0)
+    sel.add_argument("--n", type=int, default=50)
+    sel.add_argument("--dev", type=int, default=30, help="how many of the n go to dev; the rest to held_back")
+    sel.add_argument("--exclude", action="append", default=[], metavar="SUBSET_YAML",
+                     help="never pick ids already in this subset file (repeatable)")
     ret = evs.add_parser("retrieval", help="retrieval-only eval on a BioASQ split: recall@fetch, draft vs refined")
     ret.add_argument("--bioasq", required=True)
     ret.add_argument("--subset", default="tests/golden/bioasq_subset.yaml")
     ret.add_argument("--split", choices=["dev", "held_back"], default="dev")
     ret.add_argument("--limit", type=int, default=None, help="only the first N questions of the split")
     ret.add_argument("--max-llm-calls", type=int, default=200)
+    ret.add_argument("--prompt-version", type=int, default=None,
+                     help="Query Builder prompt version to evaluate (default: config.yaml prompt_versions, else latest)")
     ret.add_argument("--config", default=None, help="path to config.yaml")
     args = ap.parse_args(argv)
 
@@ -104,7 +110,8 @@ def _eval(args) -> int:
     from .eval.bioasq import load_bioasq, load_subset, select_subset, write_subset
     questions = load_bioasq(args.bioasq)
     if args.eval_cmd == "select":
-        subset = select_subset(questions, seed=args.seed)
+        exclude = {i for f in args.exclude for s in [load_subset(f)] for i in s["dev"] + s["held_back"]}
+        subset = select_subset(questions, n=args.n, dev=args.dev, seed=args.seed, exclude=exclude)
         write_subset(subset, args.bioasq, args.out)
         print(f"wrote {args.out}: {len(subset['dev'])} dev, {len(subset['held_back'])} held-back question ids")
         print("A person reviews the list and sets reviewed_by before any tuning.")
@@ -123,6 +130,8 @@ def _eval(args) -> int:
         print(f"{len(missing)} subset ids are not in {args.bioasq}, e.g. {missing[:3]}", file=sys.stderr)
         return 2
     settings = load_settings(args.config)
+    if args.prompt_version is not None:
+        settings.prompt_versions["query_builder"] = args.prompt_version
     try:
         client = resolve_clients(settings, roles=("query",))["query"]
     except (MissingApiKey, ModelNotVerified) as e:

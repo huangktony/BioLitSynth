@@ -108,6 +108,8 @@ class Settings(_Strict):
     graph: GraphConfig = GraphConfig()
     ncbi: NcbiConfig = NcbiConfig()
     providers: Providers = Providers()
+    # Pin a prompt to a version, e.g. {query_builder: 1}; prompts not listed use their highest version.
+    prompt_versions: dict[str, int] = {}
     paths: Paths = Paths()
 
 

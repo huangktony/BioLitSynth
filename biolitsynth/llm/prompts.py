@@ -9,7 +9,8 @@ File layout. Sections are introduced by HTML-comment markers so the system promp
     <!-- user:refine -->
     ...
 
-The highest N present is the live version. Changing a prompt means adding the next version, so the version string
+The highest N present is the live version unless config.yaml pins one (`prompt_versions`). Changing a prompt means
+adding the next version, so the version string
 on every cached output and trace span keeps pointing at the text that produced it. The hash is of the whole file.
 """
 from __future__ import annotations
@@ -55,12 +56,15 @@ class Prompt:
         return RenderedPrompt(self.system, user, self.version, self.hash)
 
 
-def load_prompt(name: str, *, directory: str | Path | None = None) -> Prompt:
+def load_prompt(name: str, *, version: int | None = None, directory: str | Path | None = None) -> Prompt:
+    """`version=None` loads the highest version present; an int loads exactly that one."""
     d = Path(directory) if directory else PROMPTS_DIR
     found = {int(m["n"]): p for p in d.glob(f"{name}.v*.md") if (m := _FILE.match(p.name)) and m["name"] == name}
     if not found:
         raise PromptError(f"no prompt file {name}.v<N>.md in {d}")
-    n = max(found)
+    if version is not None and version not in found:
+        raise PromptError(f"no prompt file {name}.v{version}.md in {d} (have {sorted(found)})")
+    n = max(found) if version is None else version
     raw = found[n].read_text()
     parts = _MARKER.split(raw)
     if parts[0].strip():

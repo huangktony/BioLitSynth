@@ -45,4 +45,7 @@ providers:                    # §7. Keys come from env vars (names below), neve
   openai_compat:              # NVIDIA NIM (critic, P6). Groq: base_url https://api.groq.com/openai/v1, GROQ_API_KEY
     {api_key_env: NVIDIA_API_KEY, base_url: "https://integrate.api.nvidia.com/v1", rpm: 40, max_retries: 4}
 
+# Pinned prompt versions (§11.5): a new version goes live only after its decision passes. Unlisted = latest.
+prompt_versions: {query_builder: 1}
+
 paths: {data_dir: data, runs_dir: runs}

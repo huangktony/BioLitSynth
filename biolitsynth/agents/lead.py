@@ -70,9 +70,9 @@ def build_plan(run_id: str, question: str, draft: PlanDraft, *, max_sub_question
 
 
 async def plan_question(run_id: str, question: str, llm: StageLLM, *, max_sub_questions: int,
-                        parent: str | None = None) -> BuiltPlan:
+                        version: int | None = None, parent: str | None = None) -> BuiltPlan:
     if not 2 <= max_sub_questions <= 4:
         raise ValueError("max_sub_questions must be 2 to 4 (plan §1.3)")
-    prompt = load_prompt(PROMPT).render("plan", question=question, max_sub_questions=max_sub_questions)
+    prompt = load_prompt(PROMPT, version=version).render("plan", question=question, max_sub_questions=max_sub_questions)
     draft = await llm.complete(prompt, PlanDraft, input_refs=[run_id], parent=parent)
     return build_plan(run_id, question, draft, max_sub_questions=max_sub_questions)

@@ -62,28 +62,30 @@ def check_draft(d: QueryDraft) -> str:
     return q
 
 
-def render_draft(sq: SubQuestion, band: QueryBand) -> RenderedPrompt:
-    return load_prompt(PROMPT).render("draft", sub_question=sq, min_hits=band.min_hits, max_hits=band.max_hits)
+def render_draft(sq: SubQuestion, band: QueryBand, *, version: int | None = None) -> RenderedPrompt:
+    return load_prompt(PROMPT, version=version).render("draft", sub_question=sq, min_hits=band.min_hits, max_hits=band.max_hits)
 
 
 def render_refine(sq: SubQuestion, history: list[tuple[str, int]], band: QueryBand, *, attempt: int,
-                  max_attempts: int) -> RenderedPrompt:
+                  max_attempts: int, version: int | None = None) -> RenderedPrompt:
     direction = refine_direction(history[-1][1], band)
     if direction is None:
         raise ValueError("last attempt is already in the band; nothing to refine")
-    return load_prompt(PROMPT).render("refine", sub_question=sq, history=history, direction=direction,
+    return load_prompt(PROMPT, version=version).render("refine", sub_question=sq, history=history, direction=direction,
                                       attempt=attempt, max_attempts=max_attempts,
                                       min_hits=band.min_hits, max_hits=band.max_hits)
 
 
-async def draft_query(sq: SubQuestion, llm: StageLLM, band: QueryBand, *, parent: str | None = None) -> str:
-    d = await llm.complete(render_draft(sq, band), QueryDraft, input_refs=[sq.id], parent=parent)
+async def draft_query(sq: SubQuestion, llm: StageLLM, band: QueryBand, *, version: int | None = None,
+                      parent: str | None = None) -> str:
+    d = await llm.complete(render_draft(sq, band, version=version), QueryDraft, input_refs=[sq.id], parent=parent)
     return check_draft(d)
 
 
 async def refine_query(sq: SubQuestion, history: list[tuple[str, int]], llm: StageLLM, band: QueryBand, *,
-                       attempt: int, max_attempts: int, parent: str | None = None) -> str:
-    prompt = render_refine(sq, history, band, attempt=attempt, max_attempts=max_attempts)
+                       attempt: int, max_attempts: int, version: int | None = None,
+                       parent: str | None = None) -> str:
+    prompt = render_refine(sq, history, band, attempt=attempt, max_attempts=max_attempts, version=version)
     d = await llm.complete(prompt, QueryDraft, input_refs=[sq.id], parent=parent)
     return check_draft(d)
 
@@ -104,15 +106,15 @@ class BuiltQuery:
 
 
 async def build_query(sq: SubQuestion, llm: StageLLM, pubmed: PubMedClient, band: QueryBand, *,
-                      max_refinements: int, parent: str | None = None) -> BuiltQuery:
+                      max_refinements: int, version: int | None = None, parent: str | None = None) -> BuiltQuery:
     """draft → count → (refine → count)* → pick, outside the graph (same steps as the subgraph)."""
-    q = await draft_query(sq, llm, band, parent=parent)
+    q = await draft_query(sq, llm, band, version=version, parent=parent)
     history = [(q, await count_hits(q, pubmed, parent=parent))]
     refinements = 0
     while not in_band(history[-1][1], band) and refinements < max_refinements:
         refinements += 1
         q = await refine_query(sq, history, llm, band, attempt=refinements, max_attempts=max_refinements,
-                               parent=parent)
+                               version=version, parent=parent)
         history.append((q, await count_hits(q, pubmed, parent=parent)))
     final, hits = pick_final(history, band)
     return BuiltQuery(final, hits, history)

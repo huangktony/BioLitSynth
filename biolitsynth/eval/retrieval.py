@@ -88,7 +88,7 @@ async def evaluate_question(q: BioasqQuestion, llm: StageLLM, pubmed: PubMedClie
     band, retmax = settings.query_band, settings.limits.retmax_candidates
     sq = SubQuestion(id="sq1", text=q.body, facet=Facet.OTHER, rationale="BioASQ question", key_concepts=[])
     built = await qbuild.build_query(sq, llm, pubmed, band, max_refinements=settings.limits.query_refinement_attempts,
-                                     parent=parent)
+                                     version=settings.prompt_versions.get(qbuild.PROMPT), parent=parent)
     fetched = (await pubmed.search(built.query_string, retmax=retmax, parent=parent)).pmids
     draft_q, draft_hits = built.history[0]
     draft_fetched = fetched if draft_q == built.query_string else \
@@ -128,7 +128,7 @@ async def run_retrieval_eval(questions: list[BioasqQuestion], settings: Settings
                 sp.message = f"recall@fetch {r.recall_fetch:.2f} (draft {r.recall_fetch_draft:.2f})"
             results.append(r)
         report = RetrievalReport(eval_id, split, settings.limits.retmax_candidates, ref.model,
-                                 qbuild.load_prompt(qbuild.PROMPT).version, results, llm.calls, pubmed.network_calls)
+                                 qbuild.load_prompt(qbuild.PROMPT, version=settings.prompt_versions.get(qbuild.PROMPT)).version, results, llm.calls, pubmed.network_calls)
         out = Path(out_dir or settings.paths.runs_dir / eval_id)
         out.mkdir(parents=True, exist_ok=True)
         path = out / "retrieval.json"
