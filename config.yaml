@@ -40,4 +40,7 @@ ncbi:                         # §5.3. Keys come from env vars (names below), ne
   max_retries: 3
   timeout_s: 30
 
+providers:                    # §7. Keys come from env vars (names below), never from this file.
+  gemini: {api_key_env: GEMINI_API_KEY, rpm: 10, max_retries: 4}   # rpm: free-tier guess; set from AI Studio
+
 paths: {data_dir: data, runs_dir: runs}

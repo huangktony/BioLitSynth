@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS esearch_cache (
     created_at REAL NOT NULL
 );
 
--- key = sha256(model | prompt_version | rendered prompt | schema); table is created now, used from P2
+-- key = sha256(model | prompt_version | system | rendered prompt | schema), see llm/stage.py
 CREATE TABLE IF NOT EXISTS llm_cache (
     key            TEXT PRIMARY KEY,
     model          TEXT NOT NULL,

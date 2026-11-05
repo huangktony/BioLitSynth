@@ -19,7 +19,8 @@ from .nodes import Deps, make_nodes
 from .state import RunState
 
 
-def build_graph(deps: Deps, checkpointer=None):
+def build_graph(deps: Deps, checkpointer=None, *, interrupt_after: list[str] | None = None):
+    """`interrupt_after` pauses the run after the named nodes (used to stop live runs where real stages end)."""
     lim = deps.settings.limits
     g = StateGraph(RunState)
     for name, fn in make_nodes(deps).items():
@@ -49,4 +50,4 @@ def build_graph(deps: Deps, checkpointer=None):
     g.add_conditional_edges("route", partial(r.route_after_critic, max_retries=lim.synth_retries),
                             ["synthesize", "assemble"])
     g.add_edge("assemble", END)
-    return g.compile(checkpointer=checkpointer)
+    return g.compile(checkpointer=checkpointer, interrupt_after=interrupt_after)

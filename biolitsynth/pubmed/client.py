@@ -31,6 +31,10 @@ class PubMedError(RuntimeError):
     pass
 
 
+class QueryRejected(PubMedError):
+    """esearch answered, but refused the query string (bad syntax). Network and HTTP failures are not this."""
+
+
 @dataclass
 class SearchResult:
     total: int                   # hits PubMed reports for the query
@@ -137,7 +141,7 @@ class PubMedClient:
             data = resp.json()
             res = data.get("esearchresult") or {}
             if "error" in data or "ERROR" in res or "count" not in res:
-                raise PubMedError(f"esearch rejected the query: {data.get('error') or res.get('ERROR') or data}")
+                raise QueryRejected(f"esearch rejected the query: {data.get('error') or res.get('ERROR') or data}")
             total, pmids = int(res["count"]), list(res.get("idlist", []))
             self.db.put_esearch(key, query, retmax, sort, total, pmids, self._clock())
             sp.output_refs = [f"pmid:{p}" for p in pmids]

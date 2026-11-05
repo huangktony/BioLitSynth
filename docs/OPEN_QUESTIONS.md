@@ -101,3 +101,46 @@ Still open:
 - The first live concurrency test is the 3-query graph run; it uses a mock NCBI, so real parallel fetches against
   NCBI itself have only been exercised by the single-query `fetch` demo.
 - B's half of W1 (draft schemas, quote-span validator, the first deterministic checks) is not started.
+
+## P2 status (query half: LLM Query Builder)
+Started 2026-11-05 with Tony's go-ahead. Scope: the Query Builder only; the Lead's plan call is not built.
+
+Done: `llm/gemini.py` (google-genai, JSON-schema output, 429/5xx backoff, one repair retry on invalid output),
+`llm/stage.py` (`StageLLM`: trace span per call → LLM cache → run budget → concurrency cap + rate limiter → client),
+`llm/prompts.py` (versioned prompt files), `prompts/query_builder.v1.md`, `schemas/drafts.py` (`QueryDraft`),
+`agents/query_builder.py` (draft, count, refine, pick), the real query_builder subgraph behind `dry=False`, and
+`biolitsynth run "<question>" --sub-question ... --sub-question ...` (live: stops after dedup). 44 new offline tests.
+
+Decided in code (the plan is silent or loose):
+22. **Sub-questions are given by hand until the Lead exists.** `--sub-question "text | concept; concept"`, 2-4 of
+    them, facet `other`. The plan node uses them in non-dry runs and raises if there are none.
+23. **Live runs stop after `dedup`** (LangGraph `interrupt_after`), because rerank and everything later are still
+    stubs. Status `stopped_after_dedup`. No graph edges changed.
+24. **Which attempt becomes the query:** the first in-band attempt; otherwise the non-zero attempt closest to the band
+    by ratio (10 hits vs a floor of 20 and 4,000 vs a cap of 2,000 are equally far, earlier wins ties); if every
+    attempt had 0 hits, the last. §5.2 only says "refine ≤2"; it never says what to keep when all attempts miss.
+25. **A query PubMed rejects as malformed counts as 0 hits**, so the loop broadens it. Network and HTTP failures are
+    still errors (`QueryRejected` is a separate exception from `PubMedError`).
+26. **Code tells the model the direction** (broaden / narrow) and shows every earlier attempt with its count. The
+    model only writes the query string and a one-sentence rationale (`QueryDraft`). Filters live inside the query
+    string, so `QueryFilters` is unused and `queries.filters_json` is `{}`.
+27. **Prompt file format:** `<!-- system -->` and `<!-- user:<kind> -->` markers, Jinja2 user templates with
+    StrictUndefined. The highest `v<N>` file is live; change a prompt by adding the next version.
+28. **LLM cache key** = sha256(model, prompt version, system prompt, rendered user message, schema name and JSON
+    schema). Budget (`budget.max_llm_calls_per_run`) counts uncached calls only. Exceeding it fails the run; the
+    plan's "assemble a partial report" (§8.2) waits for the assembler (P5).
+29. **New config block `providers.gemini`** (`api_key_env: GEMINI_API_KEY`, `rpm: 10`, `max_retries: 4`). The rpm is a
+    guess; set it from the AI Studio limits page. A placeholder model id or a missing key fails before any run
+    state is written.
+30. **New dependencies:** `google-genai==2.31.0` (released 2026-10-14, the newest at least two weeks old) and
+    `jinja2==3.1.6`.
+31. **Each refinement costs one extra esearch** (count-only, `retmax=0`), cached 7 days like every esearch.
+
+Still open:
+- **No live check yet.** `config.yaml` still has `TODO-verify-*` model ids and no `GEMINI_API_KEY` is set, so the
+  Query Builder has only run against scripted replies. A person should run one live question, then record its
+  replies as fixtures (`tests/fixtures/llm/`).
+- **P2 acceptance is not met**: it needs the Lead's plan call (golden Q1 → 3 sub-questions with distinct facets),
+  and §11.5 asks for D1-D2 on BioASQ dev, which needs the BioASQ subset and the retrieval-only eval.
+- The scripted LLM replies in the tests were written by the coding agent. They are inputs (what a model might
+  say), not expected answers, but replace them with recorded live replies once a live run exists.

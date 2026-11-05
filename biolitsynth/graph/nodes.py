@@ -1,21 +1,24 @@
 """LangGraph nodes (plan §8.1 rule 1): thin. Open a span, call a stage function, persist, return IDs only.
 
-In P0 the stage functions are the stubs in dry.py. Replace them one phase at a time; nodes keep their shape.
+Dry runs use the stubs in dry.py everywhere. Non-dry runs use the real stage functions that exist so far
+(P1 fetch + dedup, P2 Query Builder) and stubs for the rest; nodes keep their shape as stages are replaced.
 Rule for state writes: a node that runs in parallel (query_builder, fetch, extract) may only return reducer
 keys (see state.py). `parent_span_id` arrives in the Send payload; top-level nodes are trace roots.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from ..agents import query_builder as qbuild
 from ..config import Settings
-from ..schemas import Stage
+from ..llm import StageLLM
+from ..schemas import ResearchPlan, Stage, SubQuestion
 from ..store import Database, write_snapshot
 from ..pubmed import PubMedClient, dedup_papers
 from ..trace import Tracer
@@ -33,10 +36,29 @@ class Deps:
     tracer: Tracer
     run_dir: Path
     pubmed: PubMedClient | None = None     # None is fine for dry runs; real fetch needs it
+    llms: dict[str, StageLLM] = field(default_factory=dict)   # role (config.yaml models.*) -> StageLLM
+    manual_plan: ResearchPlan | None = None  # sub-questions given by hand, until the Lead's plan call exists
 
     @property
     def run_id(self) -> str:
         return self.tracer.run_id
+
+    def llm(self, role: str) -> StageLLM:
+        if role not in self.llms:
+            raise RuntimeError(f"a non-dry run needs Deps.llms[{role!r}] (a StageLLM)")
+        return self.llms[role]
+
+    def require_pubmed(self) -> PubMedClient:
+        if self.pubmed is None:
+            raise RuntimeError("a non-dry run needs Deps.pubmed (a PubMedClient)")
+        return self.pubmed
+
+    def sub_question(self, sq_id: str) -> SubQuestion:
+        plan = self.db.get_plan(self.run_id)
+        for sq in plan.sub_questions if plan else []:
+            if sq.id == sq_id:
+                return sq
+        raise RuntimeError(f"sub-question {sq_id} is not in this run's stored plan")
 
 
 def _qnum(query_id: str) -> int:
@@ -54,6 +76,7 @@ def build_query_builder(deps: Deps):
         sub_question_id: str
         round: int
         parent_span_id: str | None
+        dry: bool
         dry_force_refine: bool
         query_string: str
         hit_count: int
@@ -67,24 +90,38 @@ def build_query_builder(deps: Deps):
     async def draft(s: QBState) -> dict:
         async with tr.span("query", "query_builder", input_refs=[s["sub_question_id"]],
                            parent=s.get("parent_span_id")) as sp:
-            qs = f"[dry] ({s['sub_question_id']} concepts)"
+            if s.get("dry"):
+                qs = f"[dry] ({s['sub_question_id']} concepts)"
+            else:
+                qs = await qbuild.draft_query(deps.sub_question(s["sub_question_id"]), deps.llm("query"), band,
+                                              parent=sp.span_id)
             sp.output_refs = [s["query_id"]]
-            sp.message = f"{s['query_id']} drafted"
+            sp.message = f"{s['query_id']} drafted: {qs[:120]}"
         return {"query_string": qs, "refinements": 0, "history": []}
 
     async def count(s: QBState) -> dict:
-        hits = dry.dry_hit_count(s["refinements"], s.get("dry_force_refine", False))
         async with tr.span("query", "query_builder", event_type="tool_call", input_refs=[s["query_id"]],
                            parent=s.get("parent_span_id")) as sp:
-            sp.message = f"{s['query_id']} esearch count (stub): {hits} hits"
+            if s.get("dry"):
+                hits = dry.dry_hit_count(s["refinements"], s.get("dry_force_refine", False))
+                sp.message = f"{s['query_id']} esearch count (stub): {hits} hits"
+            else:
+                hits = await qbuild.count_hits(s["query_string"], deps.require_pubmed(), parent=sp.span_id)
+                sp.message = f"{s['query_id']} esearch count: {hits} hits"
         return {"hit_count": hits, "history": [*s["history"], (s["query_string"], hits)]}
 
     async def refine(s: QBState) -> dict:
-        await tr.event("query", "query_builder", "retry", input_refs=[s["query_id"]],
-                       parent=s.get("parent_span_id"), status="retry",
-                       message=f"{s['query_id']} refinement {s['refinements'] + 1}/{max_ref}: "
-                               f"{s['hit_count']} hits outside {band.min_hits}-{band.max_hits}")
-        return {"refinements": s["refinements"] + 1, "query_string": s["query_string"] + " [refined]"}
+        attempt = s["refinements"] + 1
+        sid = await tr.event("query", "query_builder", "retry", input_refs=[s["query_id"]],
+                             parent=s.get("parent_span_id"), status="retry",
+                             message=f"{s['query_id']} refinement {attempt}/{max_ref}: "
+                                     f"{s['hit_count']} hits outside {band.min_hits}-{band.max_hits}")
+        if s.get("dry"):
+            qs = s["query_string"] + " [refined]"
+        else:
+            qs = await qbuild.refine_query(deps.sub_question(s["sub_question_id"]), s["history"], deps.llm("query"),
+                                           band, attempt=attempt, max_attempts=max_ref, parent=sid)
+        return {"refinements": attempt, "query_string": qs}
 
     async def finalize(s: QBState) -> dict:
         # Upsert so a node re-executed after a crash is idempotent, but an id already used for a
@@ -94,9 +131,11 @@ def build_query_builder(deps: Deps):
         if prior and prior[0]["sub_question_id"] != s["sub_question_id"]:
             raise RuntimeError(f"query id {s['query_id']} already belongs to {prior[0]['sub_question_id']}, "
                                f"not {s['sub_question_id']}")
+        # Code picks the final attempt (first in band, else closest to it), not necessarily the last one.
+        final, hits = qbuild.pick_final(s["history"], band)
         deps.db.insert("queries", {
             "run_id": deps.run_id, "id": s["query_id"], "sub_question_id": s["sub_question_id"],
-            "query_string": s["query_string"], "filters_json": "{}", "hit_count": s["hit_count"],
+            "query_string": final, "filters_json": "{}", "hit_count": hits,
             "refinement_history_json": json.dumps(s["history"]), "round": s.get("round", 0),
         }, replace=True)
         return {}
@@ -132,11 +171,16 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
 
     async def plan(state: RunState) -> dict:
         async with tr.span("plan", "lead", input_refs=[deps.run_id]) as sp:
-            p = dry.dry_plan(deps.run_id, state["question"], st.limits.sub_questions)
+            if state.get("dry"):
+                p, how = dry.dry_plan(deps.run_id, state["question"], st.limits.sub_questions), "stub"
+            elif deps.manual_plan is not None:
+                p, how = deps.manual_plan, "given by hand; the Lead's plan call is not built yet"
+            else:
+                raise RuntimeError("the Lead's plan call is not built yet: pass the sub-questions by hand")
             db.save_plan(p)
             write_snapshot(deps.run_dir, 1, "plan", p)
             sp.output_refs = [s.id for s in p.sub_questions]
-            sp.message = f"{p.effort} plan, {len(p.sub_questions)} sub-questions (stub)"
+            sp.message = f"{p.effort} plan, {len(p.sub_questions)} sub-questions ({how})"
         return {"sub_question_ids": sp.output_refs}
 
     async def dispatch_queries(state: RunState) -> dict:
@@ -151,6 +195,12 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
 
     async def approve_queries(state: RunState) -> dict:
         gated = state.get("approve_queries") and state.get("coverage_rounds", 0) == 0
+        rows = db.query("SELECT * FROM queries WHERE run_id = ? ORDER BY round, CAST(substr(id, 2) AS INTEGER)",
+                        (deps.run_id,))
+        write_snapshot(deps.run_dir, 2, "queries", [{
+            "id": r["id"], "sub_question_id": r["sub_question_id"], "round": r["round"],
+            "query_string": r["query_string"], "hit_count": r["hit_count"],
+            "refinement_history": json.loads(r["refinement_history_json"] or "[]")} for r in rows])
         await tr.event("approve_queries", "researcher" if gated else "pipeline", "decision",
                        input_refs=state.get("query_ids", []),
                        message="waiting for researcher approval" if gated else "skipped (not requested)")
@@ -170,8 +220,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
                 pmids = dry.dry_pmids(qid)
                 sp.message = f"{qid}: {len(pmids)} synthetic candidates"
             else:
-                if deps.pubmed is None:
-                    raise RuntimeError("a non-dry fetch needs Deps.pubmed (a PubMedClient)")
+                deps.require_pubmed()
                 row = db.query("SELECT query_string FROM queries WHERE run_id = ? AND id = ?", (deps.run_id, qid))
                 if not row:
                     raise RuntimeError(f"query {qid} is not in the store")

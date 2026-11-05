@@ -32,11 +32,16 @@ ARTICLES = articles_by_pmid()
 
 
 class FakeNcbi:
-    """`searches` maps a query string to the PMIDs esearch should return; any other query returns CRC_IDS."""
+    """`searches` maps a query string to the PMIDs esearch should return; any other query returns CRC_IDS.
+    `totals` sets the hit count esearch reports per query string (else `total`, else the number of ids);
+    queries in `rejected` get an esearch ERROR response, as PubMed sends for a malformed query."""
 
-    def __init__(self, searches: dict[str, list[str]] | None = None, total: int | None = None):
+    def __init__(self, searches: dict[str, list[str]] | None = None, total: int | None = None,
+                 totals: dict[str, int] | None = None, rejected: set[str] | None = None):
         self.searches = searches or {}
         self.total = total
+        self.totals = totals or {}
+        self.rejected = rejected or set()
         self.requests: list[httpx.Request] = []
         self.fail_next: list[int] = []          # statuses to return before behaving, e.g. [429, 503]
         self.esearch_override: dict | None = None
@@ -54,9 +59,12 @@ class FakeNcbi:
         if endpoint == "esearch.fcgi":
             if self.esearch_override is not None:
                 return httpx.Response(200, json=self.esearch_override)
+            if p["term"] in self.rejected:
+                return httpx.Response(200, json={"esearchresult": {"ERROR": "Invalid query"}})
             ids = self.searches.get(p["term"], CRC_IDS)
             body = json.loads(json.dumps(RECORDED_SEARCH))
-            body["esearchresult"].update(count=str(self.total if self.total is not None else len(ids)),
+            total = self.totals.get(p["term"], self.total if self.total is not None else len(ids))
+            body["esearchresult"].update(count=str(total),
                                          idlist=ids[: int(p["retmax"])], retmax=p["retmax"])
             return httpx.Response(200, json=body)
         if endpoint == "efetch.fcgi":
@@ -67,6 +75,10 @@ class FakeNcbi:
     # --- inspection ---------------------------------------------------------------------------
     def calls(self, endpoint: str) -> list[httpx.Request]:
         return [r for r in self.requests if r.url.path.endswith(endpoint)]
+
+    def search_terms(self) -> list[tuple[str, str]]:
+        """(term, retmax) for every esearch served, in order. retmax "0" is a count-only probe."""
+        return [(self._params(r)["term"], self._params(r)["retmax"]) for r in self.calls("esearch.fcgi")]
 
     def fetched_ids(self) -> list[str]:
         return [i for r in self.calls("efetch.fcgi") for i in self._params(r)["id"].split(",")]

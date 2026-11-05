@@ -80,6 +80,10 @@ class Database:
             [(plan.run_id, s.id, s.text, s.facet.value, s.rationale) for s in plan.sub_questions],
         )
 
+    def get_plan(self, run_id: str) -> ResearchPlan | None:
+        row = self.get_run(run_id)
+        return ResearchPlan.model_validate_json(row["plan_json"]) if row and row["plan_json"] else None
+
     # --- papers (shared across runs) and per-run provenance -----------------------------------
     def upsert_paper(self, p: Paper) -> None:
         self.insert("papers", {
@@ -121,6 +125,15 @@ class Database:
     def put_esearch(self, key: str, query: str, retmax: int, sort: str, total: int, pmids: list[str], now: float) -> None:
         self.insert("esearch_cache", {"key": key, "query": query, "retmax": retmax, "sort": sort, "total": total,
                                       "pmids_json": json.dumps(pmids), "created_at": now}, replace=True)
+
+    # --- LLM cache (plan §6.3) --------------------------------------------------------------------
+    def get_llm_cache(self, key: str) -> str | None:
+        rows = self.query("SELECT response_json FROM llm_cache WHERE key = ?", (key,))
+        return rows[0]["response_json"] if rows else None
+
+    def put_llm_cache(self, key: str, model: str, prompt_version: str | None, response_json: str) -> None:
+        self.insert("llm_cache", {"key": key, "model": model, "prompt_version": prompt_version,
+                                  "response_json": response_json, "created_at": utcnow_iso()}, replace=True)
 
     # --- trace -------------------------------------------------------------------------------
     def insert_trace_event(self, e: TraceEvent) -> None:

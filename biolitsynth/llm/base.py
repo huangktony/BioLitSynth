@@ -1,4 +1,4 @@
-"""Thin LLM client protocol (plan §7). Real clients (Gemini, OpenAI-compatible, Ollama) arrive in P2."""
+"""Thin LLM client protocol (plan §7). Agents never call a client directly; they go through llm.stage.StageLLM."""
 from __future__ import annotations
 
 from typing import Protocol, TypeVar

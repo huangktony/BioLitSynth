@@ -1,8 +1,9 @@
 # BioLitSynth: rules for coding agents
 
 `docs/IMPLEMENTATION_PLAN.md` is the spec. Read the section for the phase you are in (§12) before writing code.
-Current status: **P0 and P1 accepted** (real fetch + dedup behind `dry=False`; everything else still stubs).
-Next: the verifier half of W1 (quote validator), then P2, but only when Tony says to start. Read `docs/OPEN_QUESTIONS.md` first.
+Current status: **P0 and P1 accepted.** P2 started (Tony approved, 2026-11-05): the LLM Query Builder is built and
+offline-tested; live runs stop after dedup. Not built yet: the Lead's plan call, the live check, BioASQ eval.
+Still open from W1: the quote validator. Read `docs/OPEN_QUESTIONS.md` ("P2 status") first.
 
 ## Scope guard
 - Do not add agents, data sources, frameworks, vector stores, or UI pages the plan doesn't list.

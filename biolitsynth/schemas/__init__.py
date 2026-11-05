@@ -1,4 +1,5 @@
 """All Pydantic models (plan §4). Import from here, not the submodules."""
+from .drafts import QueryDraft
 from .claims import Citation, CitedReport, CitedSentence, Claim, ReasoningStep
 from .enums import ClaimType, Direction, Facet, Organism, StudyDesign, Support, VerdictStatus
 from .evidence import (Conflict, ConflictExplanation, EvidenceItem, SideSummary, TermMap)

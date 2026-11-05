@@ -66,7 +66,7 @@ async def test_query_id_reused_for_a_different_sub_question_fails_loudly(harness
     run_id, db, graph, cfg = harness
     deps = Deps(settings=settings, db=db, tracer=Tracer(db, run_id), run_dir=settings.paths.runs_dir / run_id)
     qb = build_query_builder(deps)
-    payload = {"query_id": "q1", "sub_question_id": "sq1", "round": 0}
+    payload = {"query_id": "q1", "sub_question_id": "sq1", "round": 0, "dry": True}
     await qb.ainvoke(payload)
     await qb.ainvoke(payload)                               # re-execution after a crash: idempotent
     assert len(db.query("SELECT * FROM queries WHERE run_id = ?", (run_id,))) == 1

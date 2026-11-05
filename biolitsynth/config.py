@@ -70,6 +70,17 @@ class NcbiConfig(_Strict):
     timeout_s: float = 30
 
 
+class ProviderConfig(_Strict):
+    """One LLM provider (plan §7). The key is read from the environment variable named here, never stored."""
+    api_key_env: str
+    rpm: float = Field(10, gt=0)          # requests per minute; the client spaces calls to stay under it
+    max_retries: int = Field(4, ge=0, le=8)
+
+
+class Providers(_Strict):
+    gemini: ProviderConfig = ProviderConfig(api_key_env="GEMINI_API_KEY")
+
+
 class GraphConfig(_Strict):
     recursion_limit: int = 60
 
@@ -88,6 +99,7 @@ class Settings(_Strict):
     budget: Budget = Budget()
     graph: GraphConfig = GraphConfig()
     ncbi: NcbiConfig = NcbiConfig()
+    providers: Providers = Providers()
     paths: Paths = Paths()
 
 
