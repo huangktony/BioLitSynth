@@ -7,7 +7,7 @@ A decision is final only when the team confirms it. Rows not yet run are `untest
 |---|---|
 | D1 | untested (needs golden-question anchor PMIDs) |
 | D2 | **run, provisional** (subset not yet reviewed by a person) |
-| QB-v2 | **pre-registered 2026-11-05, not yet run** (Query Builder prompt v1 vs v2) |
+| QB-v2 | **run 2026-11-05: not adopted** (fails rules a and b); `query_builder` stays pinned to v1 |
 | D3-D14 | untested |
 
 ---
@@ -75,3 +75,44 @@ question did not need. v2 changes the prompt's rules for those failure **categor
 - (d) golden Q1 (live, Lead plan) still gives 3 queries in band that each contain every key concept.
 
 If (a) holds but (b) does not, the gain is treated as fitting the dev set and v2 is not adopted.
+
+### Result (2026-11-05)
+
+Runs (gitignored): dev v1 `eval_20261105_231810`, dev v2 `eval_20261105_233436`, check v1 `eval_20261105_234218`,
+check v2 `eval_20261105_234823`. 147 LLM calls in total.
+
+| | dev v1 | dev v2 | check v1 | check v2 |
+|---|---|---|---|---|
+| Mean recall@fetch (top 100) | 0.288 | 0.301 | 0.470 | 0.458 |
+| Queries in band | 100% | 97% | 97% | 93% |
+| Relevant PMIDs matched by the final query at all | 64% | 70% | 75% | 78% |
+| ...of which in the top 100 | 26% | 27% | 37% | 36% |
+| ...ranked past 100 (beyond cap) | 38% | 42% | 38% | 42% |
+| Not matched | 36% | 30% | 25% | 22% |
+| Median final hit count | 253 | 383 | 171 | 269 |
+
+| Rule | Needed | Got | |
+|---|---|---|---|
+| (a) dev recall@fetch | ≥ +3 pts | +1.3 | **fail** |
+| (b) check-set recall@fetch | ≥ +3 pts | −1.2 | **fail** |
+| (c) in band on each set | ≥ 90% | 97%, 93% | pass |
+| (d) golden Q1 | | not run (a and b already fail) | |
+
+**Decision: v2 is not adopted.** `config.yaml` keeps `prompt_versions: {query_builder: 1}`. `prompts/query_builder.v2.md`
+stays in the repo, unused, as the record of what was tested. As pre-registered, no further edits were tried.
+
+**What the numbers show (observations, not a new decision):** v2 did what it was written to do. It matched more of
+the relevant papers on both sets (+6 and +3 points), and it lowered the not-matched share on the unseen check set
+too, so the effect is not specific to the dev questions. But the extra matches landed **past PubMed's top 100**:
+removing framing groups made queries broader (median hits up ~50%), PubMed's lexical ranking put the newly matched
+papers low, and recall@100 did not move. So v2's value cannot be judged with a 100-paper cap and no rerank.
+
+**What follows:**
+- Re-testing v2 belongs in P3, after D3 (cap 100 vs 200) and D4 (MedCPT rerank), with **recall@25 after rerank** as
+  the metric. That is a new comparison under a different pipeline, so it gets its own pre-registered rule and a
+  **new unseen check set** (the current one has now been seen by v2).
+- For D6 (hybrid): with v2, 70-78% of relevant papers are matched by a Boolean query, and the not-matched share fell
+  further when only framing groups were removed. The case for dense retrieval rests on what remains in bucket d
+  after P3, not on today's 22-36% not-matched figures.
+- The code-side check (`concept_warnings`, trace event `query.group_not_a_key_concept`) is kept: it flags framing
+  groups in live runs, where the Lead supplies key concepts, at no cost.

@@ -114,3 +114,21 @@ async def test_a_query_pubmed_rejects_counts_as_zero_and_is_broadened(env):
     built = await build_query(SQ, llm, pubmed, BAND, max_refinements=2)
     assert built.history == [("A[bad", 0), ("B", 40)]
     await pubmed.aclose()
+
+
+def test_and_groups_split_only_at_the_top_level():
+    from biolitsynth.agents.query_builder import and_groups
+    assert and_groups("(a AND b OR c) AND d[mh] AND (e OR (f AND g))") == ["(a AND b OR c)", "d[mh]", "(e OR (f AND g))"]
+    assert and_groups("single") == ["single"]
+
+
+def test_concept_warnings_flag_missing_concepts_and_framing_groups_but_not_filters():
+    from biolitsynth.agents.query_builder import concept_warnings
+    concepts = ["metformin", "colorectal neoplasms"]
+    ok = "(metformin[mh] OR metformin[tiab]) AND (colorectal neoplasms[mh] OR colon cancer[tiab]) AND humans[mh]"
+    assert concept_warnings(ok, concepts) == []
+    bad = "(metformin[mh]) AND (function[tiab] OR role[tiab])"
+    w = concept_warnings(bad, concepts)
+    assert any("key_concept_missing 'colorectal neoplasms'" in x for x in w)
+    assert any("group_not_a_key_concept" in x and "function" in x for x in w)
+    assert concept_warnings(bad, []) == []                      # nothing to check against

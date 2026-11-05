@@ -62,6 +62,49 @@ def check_draft(d: QueryDraft) -> str:
     return q
 
 
+_FILTER_TAGS = ("[pt]", "[la]", "[dp]", "[sh]", "[sb]", "humans[mh]", "animals[mh]")
+
+
+def and_groups(query: str) -> list[str]:
+    """Top-level AND-ed parts of a query, e.g. "(a OR b) AND c[mh]" -> ["(a OR b)", "c[mh]"]."""
+    parts, depth, cur, i = [], 0, "", 0
+    while i < len(query):
+        ch = query[i]
+        depth += (ch == "(") - (ch == ")")
+        if depth == 0 and query.startswith(" AND ", i):
+            parts.append(cur.strip())
+            cur, i = "", i + 5
+            continue
+        cur += ch
+        i += 1
+    parts.append(cur.strip())
+    return [p for p in parts if p]
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in "".join(c if c.isalnum() else " " for c in text.lower()).split() if len(w) >= 3}
+
+
+def concept_warnings(query: str, key_concepts: list[str]) -> list[str]:
+    """Code-side check of prompt rule 4: every key concept appears, and every AND group is a key concept or a filter.
+    Only meaningful when key concepts are given. Matching is by shared words, so it is a warning, never a block."""
+    if not key_concepts:
+        return []
+    out = []
+    qwords = _words(query)
+    for c in key_concepts:
+        if not _words(c) & qwords:
+            out.append(f"query.key_concept_missing {c!r}")
+    concept_words = set().union(*(_words(c) for c in key_concepts))
+    for g in and_groups(query):
+        low = g.lower()
+        if any(t in low for t in _FILTER_TAGS):
+            continue
+        if not _words(g) & concept_words:
+            out.append(f"query.group_not_a_key_concept {g[:80]!r}")
+    return out
+
+
 def render_draft(sq: SubQuestion, band: QueryBand, *, version: int | None = None) -> RenderedPrompt:
     return load_prompt(PROMPT, version=version).render("draft", sub_question=sq, min_hits=band.min_hits, max_hits=band.max_hits)
 

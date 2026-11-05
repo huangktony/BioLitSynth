@@ -104,6 +104,10 @@ def build_query_builder(deps: Deps):
     async def count(s: QBState) -> dict:
         async with tr.span("query", "query_builder", event_type="tool_call", input_refs=[s["query_id"]],
                            parent=s.get("parent_span_id")) as sp:
+            if not s.get("dry"):
+                for w in qbuild.concept_warnings(s["query_string"], deps.sub_question(s["sub_question_id"]).key_concepts):
+                    await tr.event("query", "query_builder", "validation", parent=sp.span_id,
+                                   input_refs=[s["query_id"]], message=w)
             if s.get("dry"):
                 hits = dry.dry_hit_count(s["refinements"], s.get("dry_force_refine", False))
                 sp.message = f"{s['query_id']} esearch count (stub): {hits} hits"
