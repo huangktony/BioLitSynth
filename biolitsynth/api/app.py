@@ -13,6 +13,7 @@ import asyncio
 import json
 from dataclasses import asdict
 from importlib import resources
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -20,7 +21,9 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from ..config import Settings
-from ..graph.runner import run_live
+from ..eval.bioasq import load_bioasq, load_subset
+from ..eval.retrieval import run_retrieval_eval
+from ..graph.runner import resolve_clients, run_live
 from ..llm import BudgetExceeded, MissingApiKey, ModelNotVerified
 from ..pubmed.demo import fetch_demo
 from ..store import Database
@@ -35,17 +38,25 @@ class FetchRequest(BaseModel):
     retmax: int = Field(25, ge=1, le=200)
 
 
+class EvalRequest(BaseModel):
+    limit: int = Field(5, ge=1, le=30)   # first N dev questions. No split field: held-back is never run from the web UI
+
+
 class RunRequest(BaseModel):
     question: str = Field(min_length=15, max_length=1000)   # plan §16.3
 
 
 def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None = None,
-               live_overrides: dict | None = None) -> FastAPI:
+               live_overrides: dict | None = None,
+               eval_overrides: dict | None = None) -> FastAPI:
     """`transport` swaps in a fake NCBI and `live_overrides` (clients, limiters, ...) go to run_live; both for tests."""
     db = Database(settings.paths.data_dir / "biolitsynth.db")
     app = FastAPI(title="BioLitSynth dashboard")
     app.state.db = db
     app.router.on_shutdown.append(db.close)
+    ev = dict(eval_overrides or {})
+    bioasq_path = Path(ev.pop("bioasq_path", None) or settings.paths.data_dir / "eval" / "bioasq" / "training14b.json")
+    subset_path = Path(ev.pop("subset_path", None) or "tests/golden/bioasq_subset.yaml")
     job_lock = asyncio.Lock()     # one run or fetch at a time (shared LLM quota and NCBI rate limit)
 
     def run_or_404(run_id: str):
@@ -100,8 +111,67 @@ def create_app(settings: Settings, *, transport: httpx.AsyncBaseTransport | None
 
     @app.get("/api/runs")
     def list_runs() -> list[dict]:
-        rows = db.query("SELECT run_id, question, status, created_at FROM runs ORDER BY created_at DESC")
+        rows = db.query("SELECT run_id, question, status, created_at FROM runs WHERE run_id NOT LIKE 'eval\\_%' ESCAPE '\\' "
+                        "ORDER BY created_at DESC")
         return [{**dict(r), "counts": counts(r["run_id"])} for r in rows]
+
+    def eval_report(eval_id: str) -> dict | None:
+        path = settings.paths.runs_dir / eval_id / "retrieval.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    @app.get("/api/eval/subset")
+    def eval_subset() -> dict:
+        out = {"source_present": bioasq_path.exists(), "subset_present": subset_path.exists(),
+               "reviewed_by": None, "dev": 0, "held_back": 0}
+        if out["subset_present"]:
+            sub = load_subset(subset_path) or {}
+            out.update(reviewed_by=sub.get("reviewed_by"), dev=len(sub.get("dev") or []),
+                       held_back=len(sub.get("held_back") or []))
+        return out
+
+    @app.get("/api/evals")
+    def list_evals() -> list[dict]:
+        rows = db.query("SELECT run_id, question, status, created_at FROM runs WHERE run_id LIKE 'eval\\_%' ESCAPE '\\' "
+                        "ORDER BY created_at DESC, run_id DESC")
+        return [{**dict(r), "summary": (rep or {}).get("summary")} for r in rows
+                for rep in [eval_report(r["run_id"])]]
+
+    @app.get("/api/evals/{eval_id}")
+    def eval_detail(eval_id: str) -> dict:
+        r = db.get_run(eval_id)
+        if r is None or not eval_id.startswith("eval_"):
+            raise HTTPException(404, f"no eval {eval_id}")
+        return {"run_id": r["run_id"], "status": r["status"], "created_at": r["created_at"],
+                "report": eval_report(eval_id)}
+
+    @app.post("/api/evals")
+    async def start_eval(req: EvalRequest) -> dict:
+        """Retrieval eval on the first `limit` dev questions (plan §11.3b). Never the held-back split (§11.5 rule 2)."""
+        if job_lock.locked():
+            raise HTTPException(409, "a run or fetch is already in progress; wait for it to finish")
+        async with job_lock:
+            if not bioasq_path.exists():
+                raise HTTPException(400, f"BioASQ source file not found: {bioasq_path}")
+            if not subset_path.exists():
+                raise HTTPException(400, f"subset file not found: {subset_path}. Create it with: "
+                                         f"biolitsynth eval select --bioasq {bioasq_path}")
+            questions = load_bioasq(bioasq_path)
+            ids = (load_subset(subset_path).get("dev") or [])[: req.limit]
+            missing = [i for i in ids if i not in questions]
+            if missing:
+                raise HTTPException(400, f"{len(missing)} subset ids are not in {bioasq_path}, e.g. {missing[:3]}")
+            try:
+                client = ev.get("client") or resolve_clients(settings, roles=("query",))["query"]
+            except (MissingApiKey, ModelNotVerified) as exc:      # before any run row is written
+                raise HTTPException(400, f"cannot start: {exc}") from exc
+            extra = {k: ev[k] for k in ("transport", "ncbi_env", "llm_limiter", "ncbi_limiter") if k in ev}
+            extra.setdefault("transport", transport)
+            try:
+                report, _ = await run_retrieval_eval([questions[i] for i in ids], settings, split="dev",
+                                                     client=client, max_llm_calls=3 * req.limit, **extra)
+            except Exception as exc:                              # run_retrieval_eval marks the run failed
+                raise HTTPException(502, f"eval failed: {type(exc).__name__}: {exc}") from exc
+        return {"eval_id": report.eval_id, "summary": report.summary()}
 
     @app.get("/api/runs/{run_id}")
     def run_detail(run_id: str) -> dict:

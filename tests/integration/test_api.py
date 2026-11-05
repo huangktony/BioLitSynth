@@ -177,3 +177,103 @@ def test_post_run_without_api_key_is_400_and_creates_no_run(settings, monkeypatc
         db = Database(settings.paths.data_dir / "biolitsynth.db")
         assert db.query("SELECT COUNT(*) FROM runs")[0][0] == 0
         db.close()
+
+
+# ---- BioASQ retrieval eval (dev split only) ----
+
+EV_DRAFT, EV_FINAL = "metformin[majr] AND crc[ti]", "metformin AND colorectal"
+EV_X = "41911553"         # relevant, not in the final query's results
+
+
+def _eval_files(tmp_path, reviewed_by="null", dev="[d1]"):
+    src = tmp_path / "bq.json"
+    src.write_text(json.dumps({"questions": [
+        {"id": "d1", "body": "Does metformin lower colorectal cancer risk?", "type": "yesno",
+         "documents": [f"http://www.ncbi.nlm.nih.gov/pubmed/{p}" for p in (CRC_IDS[0], CRC_IDS[1], EV_X)]},
+        {"id": "h1", "body": "Held back question that must never run?", "type": "yesno",
+         "documents": [f"http://www.ncbi.nlm.nih.gov/pubmed/{CRC_IDS[2]}"]}]}))
+    sub = tmp_path / "subset.yaml"
+    sub.write_text(f"reviewed_by: {reviewed_by}\ndev: {dev}\nheld_back: [h1]\n")
+    return src, sub
+
+
+def _eval_app(settings, tmp_path, dev="[d1]", **over):
+    src, sub = _eval_files(tmp_path, dev=dev)
+    ncbi = FakeNcbi(searches={EV_DRAFT: [CRC_IDS[0]], EV_FINAL: CRC_IDS}, totals={EV_DRAFT: 3, EV_FINAL: 150})
+    ov = {"bioasq_path": src, "subset_path": sub, "transport": ncbi.transport, "ncbi_env": {},
+          "llm_limiter": TokenBucket(10_000), "ncbi_limiter": TokenBucket(10_000),
+          "client": ScriptedClient([("colorectal cancer risk?\nFacet", {"query_string": EV_DRAFT, "rationale": "r"}),
+                                    ("Broaden it", {"query_string": EV_FINAL, "rationale": "r"})])}
+    ov.update(over)
+    return create_app(settings, eval_overrides=ov)
+
+
+def _run_ids(settings):
+    db = Database(settings.paths.data_dir / "biolitsynth.db")
+    try:
+        return {r["run_id"] for r in db.query("SELECT run_id FROM runs")}
+    finally:
+        db.close()
+
+
+def test_post_eval_runs_dev_only_and_the_endpoints_match_the_file(settings, tmp_path):
+    with TestClient(_eval_app(settings, tmp_path)) as c:
+        r = c.post("/api/evals", json={"limit": 5})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        saved = json.loads((settings.paths.runs_dir / body["eval_id"] / "retrieval.json").read_text())
+        detail = c.get(f"/api/evals/{body['eval_id']}").json()
+        assert detail["report"] == saved and detail["status"] == "completed_eval"
+        assert body["summary"] == saved["summary"] == detail["report"]["summary"]
+        assert saved["split"] == "dev" and [q["id"] for q in saved["questions"]] == ["d1"]
+        assert "h1" not in json.dumps(saved)
+        assert body["eval_id"] not in [x["run_id"] for x in c.get("/api/runs").json()]
+        listed = c.get("/api/evals").json()
+        assert [e["run_id"] for e in listed] == [body["eval_id"]]
+        assert listed[0]["summary"] == saved["summary"] and listed[0]["question"]
+        assert c.get("/api/evals/nope").status_code == 404
+
+
+def test_eval_detail_404_for_a_non_eval_run(client):
+    c, s, _, _ = client
+    assert c.get(f"/api/evals/{s.run_id}").status_code == 404
+    assert c.get("/api/evals").json() == []
+
+
+@pytest.mark.parametrize("limit", [0, 31])
+def test_post_eval_limit_out_of_range_is_422(settings, tmp_path, limit):
+    with TestClient(_eval_app(settings, tmp_path)) as c:
+        assert c.post("/api/evals", json={"limit": limit}).status_code == 422
+        assert _run_ids(settings) == set()
+
+
+def test_post_eval_missing_subset_is_400_and_writes_no_run(settings, tmp_path):
+    with TestClient(_eval_app(settings, tmp_path, subset_path=tmp_path / "missing.yaml")) as c:
+        before = _run_ids(settings)
+        r = c.post("/api/evals", json={})
+        assert r.status_code == 400 and "subset file not found" in r.json()["detail"]
+        assert _run_ids(settings) == before
+
+
+def test_post_eval_unknown_subset_id_is_400(settings, tmp_path):
+    with TestClient(_eval_app(settings, tmp_path, dev="[d1, zzz]")) as c:
+        assert c.post("/api/evals", json={}).status_code == 400
+        assert _run_ids(settings) == set()
+
+
+def test_post_eval_without_api_key_is_400_and_writes_no_run(settings, tmp_path, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with TestClient(_eval_app(settings, tmp_path, client=None)) as c:
+        before = _run_ids(settings)
+        r = c.post("/api/evals", json={"limit": 1})
+        assert r.status_code == 400 and r.json()["detail"].startswith("cannot start")
+        assert _run_ids(settings) == before
+
+
+def test_eval_subset_reflects_the_file(settings, tmp_path):
+    with TestClient(_eval_app(settings, tmp_path)) as c:
+        assert c.get("/api/eval/subset").json() == {
+            "source_present": True, "subset_present": True, "reviewed_by": None, "dev": 1, "held_back": 1}
+    with TestClient(_eval_app(settings, tmp_path, bioasq_path=tmp_path / "x.json", subset_path=tmp_path / "x.yaml")) as c:
+        s = c.get("/api/eval/subset").json()
+        assert (s["source_present"], s["subset_present"], s["dev"]) == (False, False, 0)

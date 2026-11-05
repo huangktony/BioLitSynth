@@ -71,12 +71,22 @@
   .sq:last-child { border-bottom: 0; }
   ol.attempts { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
   ol.attempts li.final { font-weight: 600; }
+  nav.tabs { display: flex; gap: 4px; margin-left: 16px; }
+  nav.tabs button { border: 0; background: transparent; padding: 8px 14px; border-radius: 6px; cursor: pointer; font: inherit; font-weight: 500; color: var(--muted); }
+  nav.tabs button[aria-pressed=true] { background: var(--soft); color: var(--ink); }
+  .amber { background: #FDF1DC; color: #6B3A06; border-radius: 6px; padding: 8px 12px; margin-top: 10px; }
+  form.evalrun { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  form.evalrun input[name=limit] { width: 80px; min-height: 40px; padding: 0 8px; border: 1px solid #C9CED6; border-radius: 6px; font: inherit; }
+  form.evalrun button { min-height: 40px; padding: 0 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; font-weight: 500; cursor: pointer; }
+  form.evalrun button:disabled { opacity: .6; cursor: wait; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 <header><div class="in"><b>BioLitSynth</b><span class="muted">dashboard</span>
+  <nav class="tabs"><button id="tab-research" aria-pressed="true">Research</button><button id="tab-eval" aria-pressed="false">Eval</button></nav>
   <span class="note">Reads data/biolitsynth.db. Live runs stop after dedup until P3. Dry runs start from the CLI.</span></div></header>
-<div class="wrap">
+<div class="wrap" id="research">
   <section class="card" style="flex: 1 1 100%">
     <h2>Ask a research question</h2>
     <form class="ask" id="ask">
@@ -95,6 +105,19 @@
   </section>
   <aside class="card"><h2>Runs</h2><div id="runs"><p class="empty">Loading…</p></div></aside>
   <main id="main"><div class="card empty">Pick a run.</div></main>
+</div>
+<div class="wrap hidden" id="evalpane">
+  <section class="card" style="flex: 1 1 100%">
+    <h2>BioASQ retrieval eval</h2>
+    <div id="subset-card"><p class="empty">Loading…</p></div>
+    <form class="evalrun" id="evalform">
+      <label class="muted">dev questions <input name="limit" type="number" min="1" max="30" value="5" aria-label="Number of dev questions"></label>
+      <button type="submit">Run retrieval eval (dev)</button>
+    </form>
+    <div id="eval-status" class="status muted">Uses 1 to 3 LLM calls per question. Held-back questions are never run from here.</div>
+  </section>
+  <aside class="card"><h2>Evals</h2><div id="evals"><p class="empty">Loading…</p></div></aside>
+  <main id="evalmain"><div class="card empty">Pick an eval.</div></main>
 </div>
 <script>
 const $ = (tag, attrs = {}, ...kids) => {
@@ -268,6 +291,107 @@ document.getElementById("search").onsubmit = async (ev) => {
   } catch (err) {
     status.className = "status err"; status.textContent = String(err.message || err);
     loadRuns();
+  } finally { btn.disabled = false; }
+};
+
+const pct = (x) => (x == null ? "n/a" : `${(x * 100).toFixed(1)}%`);
+const num = (x) => (x == null ? "n/a" : String(x));
+let currentEval = null, evalLoaded = false;
+
+function setTab(name) {
+  document.getElementById("research").classList.toggle("hidden", name !== "research");
+  document.getElementById("evalpane").classList.toggle("hidden", name !== "eval");
+  document.getElementById("tab-research").setAttribute("aria-pressed", String(name === "research"));
+  document.getElementById("tab-eval").setAttribute("aria-pressed", String(name === "eval"));
+  if (name === "eval" && !evalLoaded) { evalLoaded = true; loadSubset(); loadEvals(); }
+}
+document.getElementById("tab-research").onclick = () => setTab("research");
+document.getElementById("tab-eval").onclick = () => setTab("eval");
+
+async function loadSubset() {
+  const box = document.getElementById("subset-card");
+  try {
+    const s = await api("/api/eval/subset");
+    const create = "biolitsynth eval select --bioasq data/eval/bioasq/training14b.json";
+    box.replaceChildren(
+      $("div", {}, $("span", { class: "pill grey" }, `dev ${s.dev}`), " ", $("span", { class: "pill grey" }, `held back ${s.held_back}`),
+        " ", $("span", { class: "muted" }, s.reviewed_by ? `reviewed by ${s.reviewed_by}` : "")),
+      !s.source_present ? $("div", { class: "amber" }, "BioASQ source file missing (data/eval/bioasq/training14b.json). Download it, then create the subset with: ",
+        $("span", { class: "mono" }, create)) : null,
+      !s.subset_present ? $("div", { class: "amber" }, "Subset file missing (tests/golden/bioasq_subset.yaml). Create it with: ",
+        $("span", { class: "mono" }, create)) : null,
+      s.subset_present && !s.reviewed_by ? $("div", { class: "amber" },
+        "Subset not reviewed yet: a person reviews tests/golden/bioasq_subset.yaml and sets reviewed_by before tuning") : null);
+  } catch (err) { box.replaceChildren(empty(String(err))); }
+}
+
+async function loadEvals() {
+  const evals = await api("/api/evals");
+  const box = document.getElementById("evals");
+  box.replaceChildren(...(evals.length ? evals.map((e) =>
+    $("button", { class: "run" + (e.run_id === currentEval ? " on" : ""), onclick: () => showEval(e.run_id) },
+      e.summary ? `${e.summary.questions} questions, recall@fetch ${pct(e.summary.mean_recall_fetch)}` : e.question,
+      $("small", { class: "mono" }, `${e.run_id} · ${e.status}`))) : [empty("No evals yet.")]));
+  if (!currentEval && evals.length) showEval(evals[0].run_id);
+}
+
+async function showEval(id) {
+  currentEval = id;
+  loadEvals();
+  const d = await api(`/api/evals/${id}`);
+  const main = document.getElementById("evalmain");
+  const rep = d.report;
+  if (!rep) { main.replaceChildren($("div", { class: "card" }, $("span", { class: "pill" + (d.status === "failed" ? " bad" : "") }, d.status), " ",
+    $("span", { class: "mono muted" }, d.run_id), empty("No retrieval.json for this eval."))); return; }
+  const s = rep.summary;
+  const kpi = (l, v, n) => $("div", { class: "kpi" }, $("span", {}, l), $("b", { class: "mono" }, v), $("span", {}, n || "\u00a0"));
+  main.replaceChildren(
+    $("section", { class: "card" },
+      $("div", {}, $("span", { class: "pill" + (d.status === "failed" ? " bad" : "") }, d.status), " ",
+        $("span", { class: "mono muted" }, `${d.run_id} · ${rep.split} · ${rep.model} · ${rep.prompt_version} · retmax ${rep.retmax}`)),
+      $("div", { class: "kpis", style: "margin-top:12px" },
+        kpi("Questions", num(s.questions)),
+        kpi("Recall@fetch final", pct(s.mean_recall_fetch), "after refinement"),
+        kpi("Recall@fetch draft", pct(s.mean_recall_fetch_draft), "first LLM draft"),
+        kpi("In band", pct(s.share_in_band), "share of questions"),
+        kpi("Refinements", num(s.mean_refinements), "mean per question"),
+        kpi("Misses", `${s.misses_beyond_cap} / ${s.misses_not_matched}`, "beyond cap / not matched"),
+        kpi("LLM calls", num(s.llm_calls)),
+        kpi("NCBI calls", num(s.ncbi_calls)))),
+    $("section", { class: "card" }, $("h2", {}, `Per question (${rep.questions.length})`),
+      rep.questions.length ? $("div", { class: "scroll", style: "max-height:none" }, $("table", {},
+        $("thead", {}, $("tr", {}, ["Question", "Relevant", "Draft query", "Draft hits", "Draft recall", "Final query", "Final hits",
+          "Final recall", "Refinements", "Misses (beyond cap / not matched)"].map((h) => $("th", {}, h)))),
+        $("tbody", {}, rep.questions.map((q) => {
+          const m = Object.values(q.misses);
+          return $("tr", {},
+            $("td", {}, q.question, $("div", { class: "mono muted" }, q.id)),
+            $("td", { class: "mono" }, q.n_relevant),
+            $("td", { class: "mono" }, q.draft_query), $("td", { class: "mono" }, q.draft_hits), $("td", { class: "mono" }, pct(q.recall_fetch_draft)),
+            $("td", { class: "mono" }, q.final_query), $("td", { class: "mono" }, q.final_hits), $("td", { class: "mono" }, pct(q.recall_fetch)),
+            $("td", { class: "mono" }, q.refinements),
+            $("td", { class: "mono" }, `${m.filter((x) => x === "beyond_cap").length} / ${m.filter((x) => x === "not_matched").length}`));
+        })))) : empty("No questions in this report.")));
+}
+
+document.getElementById("evalform").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const form = ev.target, btn = form.querySelector("button"), status = document.getElementById("eval-status");
+  btn.disabled = true; status.className = "status muted";
+  status.textContent = "Running the Query Builder and PubMed searches for each question… this can take several minutes on the free tier.";
+  try {
+    const r = await fetch("/api/evals", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ limit: Number(form.limit.value) }) });
+    const body = await r.json();
+    if (!r.ok) throw new Error(errText(body));
+    const s = body.summary;
+    status.textContent = `${s.questions} questions: recall@fetch ${pct(s.mean_recall_fetch)} (draft ${pct(s.mean_recall_fetch_draft)}). ` +
+      `${s.llm_calls} LLM call(s), ${s.ncbi_calls} NCBI call(s).`;
+    currentEval = null;
+    await showEval(body.eval_id);
+  } catch (err) {
+    status.className = "status err"; status.textContent = String(err.message || err);
+    loadEvals();
   } finally { btn.disabled = false; }
 };
 
