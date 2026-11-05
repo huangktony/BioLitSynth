@@ -1,6 +1,7 @@
 # BioLitSynth — Implementation & Specification Plan
 
-> **Status:** Draft v1.4 · 2026-10-22
+> **Status:** Draft v1.5 · 2026-11-05 (v1.5 changes pending Tony's review)
+> v1.5: every tunable workflow choice is decided by a pre-registered experiment (§11.5 decision register); BioASQ added as a retrieval benchmark (§11.3b); hybrid dense retrieval is a conditional option, built only if D6 triggers.
 > v1.1: LangGraph orchestration, updated critic model, model bake-off.
 > v1.4: MedCPT relevance reranking before extraction (§5.4c).
 > v1.3: web frontend (FastAPI + React, live SSE progress, provenance explorer), §16.
@@ -28,13 +29,15 @@ A user asks a complex biomedical question. A **Lead Agent** breaks it into 2–4
 
 ### 1.2 Non-Goals (do NOT build)
 - Full-text retrieval (PMC OA, PDFs), figure/table parsing.
-- Knowledge graphs, vector DBs, dense retrieval over our own corpus. (MedCPT is used **only to rerank** PubMed's results, §5.4c, not as a search index.)
+- Knowledge graphs, vector DBs, dense retrieval over our own corpus. (MedCPT is used **only to rerank** PubMed's results, §5.4c, not as a search index.) **Exception:** if decision D6 (§11.5) shows that Boolean queries miss a material share of relevant papers, and the team approves, the hybrid retrieval branch in §11.5 may be built. Until then, don't build it.
 - User accounts, auth, multi-user deployment, cloud hosting. The web app runs locally (`localhost`) for the demo.
-- Sources other than PubMed (no Semantic Scholar, no bioRxiv, no Google Scholar).
+- Sources other than PubMed (no Semantic Scholar, no bioRxiv, no Google Scholar). BioASQ (§11.3b) is **evaluation data only**: it never feeds a run.
 - Meta-analysis statistics (pooling effect sizes, forest plots).
 - Fine-tuning, RAG chat interfaces, follow-up Q&A.
 
 ### 1.3 Hard limits (configurable, defaults shown)
+
+The defaults below are starting values. Each one that affects quality is confirmed or changed by an experiment in the §11.5 decision register; the "Max" column stays a hard cap either way.
 
 | Parameter | Default | Max |
 |---|---|---|
@@ -596,7 +599,7 @@ The Lead Agent's full draft is in **Appendix A**. Other agents follow the same t
   4. *(complex only)* Safety / adverse effects or a competing hypothesis.
 - **Planned cross-literature links.** The plan also lists 1–2 `bridges`: hypotheses that connect sub-questions, e.g. "AMPK activation (sq2, mechanism) may explain reduced tumor growth (sq1, clinical)". The Synthesizer must test each bridge: write an INFERRED claim if the evidence supports it, or a GAP claim saying why it doesn't. This is the system's main value over single-pool RAG. (`ResearchPlan` gets `bridges: list[Bridge{id, from_sub_question_id, to_sub_question_id, hypothesis}]`.)
 - **Optional query approval** (off by default, `--approve-queries`): after the Query Builders finish, a LangGraph `interrupt` pauses the run so a researcher can edit or veto queries in the dashboard before fetching. This lets domain experts patch recall problems the system can't detect itself.
-- **Call 2, Coverage check** (after extraction). Input: per-sub-question counts of papers, evidence items, and designs. Output `CoverageDecision{sufficient: bool, gaps: [{sub_question_id, reason, suggested_new_concepts}]}`. Rule: a sub-question with fewer than 3 evidence items triggers **at most one** extra Query Builder round for that sub-question. After that, the remaining gaps become `GAP` claims.
+- **Call 2, Coverage check** (after extraction). Input: per-sub-question counts of papers, evidence items, and designs. Output `CoverageDecision{sufficient: bool, gaps: [{sub_question_id, reason, suggested_new_concepts}]}`. Rule: a sub-question with fewer than 3 evidence items triggers **at most one** extra Query Builder round for that sub-question. After that, the remaining gaps become `GAP` claims. The threshold of 3 and the value of the gap round are checked by decision D9 (§11.5).
 - **Never** reads abstracts directly. It only sees stats and IDs.
 
 ### 5.2 Query Builder (×k, parallel)
@@ -604,6 +607,7 @@ The Lead Agent's full draft is in **Appendix A**. Other agents follow the same t
 - **Tool:** `pubmed_count(query) -> int` (esearch with `rettype=count`).
 - **Refinement loop** (≤2, implemented as a cycle in the `query_builder` subgraph): if hits = 0, broaden (drop a filter, OR in synonyms). If hits > 5,000, narrow (add a design filter, a MeSH major topic, or a date range). Target band: **20–2,000 hits**.
 - Every attempt is recorded in `refinement_history` and emitted as a trace span.
+- **Evidence:** the target band and the refinement loop itself are kept only if they improve retrieval recall on BioASQ dev over an untuned query (decision D2, §11.5).
 
 ### 5.3 PubMed Fetcher (code)
 - NCBI E-utilities: `esearch.fcgi` (`usehistory=y`) → `efetch.fcgi` (`rettype=abstract`, `retmode=xml`) in batches of up to 200 PMIDs.
@@ -648,7 +652,7 @@ Union-find over papers in the run. Two PMIDs join the same `StudyCluster` if:
 4. Sort by score. **Keep the top-X** (`papers_per_query`, default 25) **that also clear `min_score`**. Everything else is stored with `kept=false` and a `drop_reason`, never deleted.
 5. A paper retrieved by several queries is scored against each relevant sub-question. It goes to extraction if it is kept for **any** of them, and the extractor only gets the sub-questions it was kept for.
 
-**`min_score` (relevance floor):** cross-encoder logits aren't calibrated probabilities, so the floor is set empirically. In P3, score the golden-question candidates, hand-label ~50 pairs as relevant / irrelevant, and pick the threshold with ≥95% recall of relevant papers. Until calibrated, `min_score = null` (top-X only). The floor is what makes "top-X" mean "top-X *relevant*". If only 12 candidates clear the bar, only 12 are kept, and the Lead's coverage check (§5.1) sees the shortfall and can trigger a gap round with new concepts.
+**`min_score` (relevance floor):** cross-encoder logits aren't calibrated probabilities, so the floor is set empirically. In P3, score the golden-question candidates, hand-label ~50 pairs as relevant / irrelevant, and pick the threshold with ≥95% recall of relevant papers. BioASQ dev questions (§11.3b) add labeled pairs for free: their relevant PMIDs are positives. Decision D5 (§11.5). Until calibrated, `min_score = null` (top-X only). The floor is what makes "top-X" mean "top-X *relevant*". If only 12 candidates clear the bar, only 12 are kept, and the Lead's coverage check (§5.1) sees the shortfall and can trigger a gap round with new concepts.
 
 **Runtime & ops:**
 - Loaded **once** per process (FastAPI startup / CLI start) as a singleton; ~110M parameters (PubMedBERT-base), ~440 MB download, cached in `~/.cache/huggingface`.
@@ -668,6 +672,7 @@ Union-find over papers in the run. Two PMIDs join the same `StudyCluster` if:
   - Found → set `quote_start` / `quote_end`.
   - Not found → fuzzy match (`rapidfuzz.partial_ratio ≥ 95`) → snap the quote to the exact abstract span and log `validation.quote_snapped`.
   - Still not found → re-extract that one paper once, then drop the item and log `validation.quote_dropped`.
+  - The fuzzy threshold (95) is checked by decision D8 (§11.5).
 - The extractor also returns `cohort_or_trial_name` (verbatim, or null) for study clustering.
 - `subject` / `outcome` are lowercased and stripped by code. Synonym resolution happens later in the Term Normalizer (§5.5b), not here.
 
@@ -692,7 +697,7 @@ Union-find over papers in the run. Two PMIDs join the same `StudyCluster` if:
 | `leans` | Ratio between 2:1 and 4:1, or only one side has moderate+ studies | Evidence leans one way. The minority side must still be cited and described. |
 | `lopsided` | Ratio > 4:1 **and** the minority side has only low-strength studies | Strong majority. The minority is mentioned as a caveat with citations. |
 
-Thresholds live in `config.yaml` (`conflict.balance_ratio=2`, `conflict.lopsided_ratio=4`) so the team can tune them, and the dashboard shows the weights behind every label.
+Thresholds live in `config.yaml` (`conflict.balance_ratio=2`, `conflict.lopsided_ratio=4`) so the team can tune them, and the dashboard shows the weights behind every label. They are tuned against person-assigned balance labels, not by feel (decision D12, §11.5).
 
 **Step 3: Adjudication (LLM, one call per ≤5 candidate buckets).** For each candidate, the model sees both sides' evidence (statement, quote, design, organism, population, n) and:
 1. **Confirms or rejects** it as a real conflict. Reject when, for example, the outcomes only look alike, or one item is background, not a finding.
@@ -870,7 +875,7 @@ Free-tier catalogs and limits change monthly. **Verify current model IDs and lim
 | Offline dev fallback | Local **Ollama** (e.g., Qwen3 8B/14B) | No rate limits for prompt iteration and CI. Quality is lower, so don't use it for the demo. |
 
 **Notes:**
-- **Model choice is decided by our own eval, not by general benchmarks.** GPQA and SWE-bench don't measure verbatim quote copying, claim–evidence entailment, or catching species and causal overreach. In P6, run a **bake-off**: the §11.4 injection suite and the quote-match rate across 2–3 candidate critics and 2 extractor candidates on one recorded run. Pick the winners and record results in `docs/MODEL_EVAL.md`.
+- **Model choice is decided by our own eval, not by general benchmarks.** GPQA and SWE-bench don't measure verbatim quote copying, claim–evidence entailment, or catching species and causal overreach. In P6, run a **bake-off**: the §11.4 injection suite and the quote-match rate across 2–3 candidate critics and 2 extractor candidates on one recorded run. Pick the winners and record results in `docs/MODEL_EVAL.md` (decision D13, §11.5).
 - Medical hallucination studies show that even strong models miss "near-miss" errors, and accuracy drops sharply when evidence has to be combined across documents. That is why the critic judges one claim at a time against only its cited evidence.
 - Gemini **Pro** models were reportedly removed from the free tier in 2026, so plan around Flash-class models.
 - Free-tier Gemini traffic may be used by Google to improve its products. That's fine here, because PubMed abstracts are public, but **never send private or unpublished data** through it.
@@ -951,14 +956,14 @@ BioLitSynth/
 │   ├── api/                       # FastAPI app: routes, SSE event bus, run manager (§16)
 │   └── cli.py                     # `biolitsynth run "<question>" [--resume] [--from] [--inject-conflict]`
 ├── web/                           # React + Vite + TypeScript frontend (§16)
-├── data/                          # gitignored: db, pubmed cache
+├── data/                          # gitignored: db, pubmed cache, eval/bioasq/ (downloaded BioASQ files)
 ├── runs/                          # gitignored: per-run snapshots, trace.jsonl, report
 └── tests/
     ├── fixtures/pubmed/*.xml      # recorded efetch responses
     ├── fixtures/llm/*.json        # recorded LLM outputs for FakeClient
     ├── unit/
     ├── integration/
-    ├── golden/                    # known questions + expected properties
+    ├── golden/                    # known questions + expected properties; bioasq_subset.yaml (question IDs + dev/held-back split only)
     └── injection/                 # adversarial cases for the verifier
 ```
 
@@ -1015,7 +1020,30 @@ This section is the contract the Synthesizer, Checker, and Critic all enforce.
 | "Are GLP-1 receptor agonists associated with an increased risk of pancreatitis?" | Safety question with mixed evidence | Safety facet present; hedged language |
 | "What is the role of the gut microbiome in Parkinson's disease progression?" | Mechanism-heavy, mostly animal evidence | `species_guard` / Critic flags any human-level DIRECT claim |
 
-**Retrieval recall check (partial mitigation for unmeasured recall):** for each golden question the team lists 3–5 **anchor PMIDs**, the landmark papers any competent search should find (e.g. the major RCTs). `biolitsynth eval` reports the anchor recall per question. It's a sanity check, not a full recall metric. The eval reports anchor recall **both before and after** MedCPT reranking, so we can see if the rerank ever drops a landmark paper. It also reports **precision@X**: the share of kept papers hand-labeled relevant on a 20-paper sample, with vs. without rerank.
+**Retrieval recall check (sanity check; the main recall measurement is BioASQ, §11.3b):** for each golden question the team lists 3–5 **anchor PMIDs**, the landmark papers any competent search should find (e.g. the major RCTs). `biolitsynth eval` reports the anchor recall per question. It's a sanity check, not a full recall metric. The eval reports anchor recall **both before and after** MedCPT reranking, so we can see if the rerank ever drops a landmark paper. It also reports **precision@X**: the share of kept papers hand-labeled relevant on a 20-paper sample, with vs. without rerank.
+
+### 11.3b BioASQ retrieval benchmark
+**Why:** four golden questions with 3–5 anchor PMIDs each are too few to trust a recall percentage. BioASQ provides biomedical questions with **expert-labeled relevant PubMed documents**, so recall can be measured on dozens of questions, with answers no one on the team or any agent wrote.
+
+**Data:** the BioASQ Task B (biomedical semantic QA) training set. Each question has a type (`yesno`, `factoid`, `list`, `summary`) and a list of relevant PubMed documents.
+- Access needs a free registration on the BioASQ site, and the data has its own license (verify both before P2). Downloaded files live in `data/eval/bioasq/` (gitignored). The repo commits only `tests/golden/bioasq_subset.yaml`: question IDs and the split, no question text or labels.
+- **Selection** (done once, by a person, before any tuning): keep `yesno` and `summary` questions, which are closest to BioLitSynth's questions; keep questions with ≥5 relevant PMIDs; draw 50 at random with a fixed seed. A person may drop questions that are off-topic for the system (e.g. pure bioinformatics tooling) but never edits labels.
+- **Split:** 30 **dev** questions (used for every decision in §11.5) and 20 **held-back** questions (used once, in W6, to report final numbers).
+
+**How it runs:** each BioASQ question is treated as **one sub-question**, and only the retrieval half of the graph runs: Query Builder → fetch → dedup → rerank. No Lead plan, extraction, or synthesis, so it costs 1–3 LLM calls per question (Query Builder) and no extraction calls. `biolitsynth eval --retrieval --set bioasq-dev` prints the metrics below.
+
+**Metrics** (per question, then averaged):
+| Metric | Definition | Answers |
+|---|---|---|
+| Recall@fetch | share of relevant PMIDs among the fetched candidates (before rerank) | Does the query find the papers? |
+| Recall@X | share of relevant PMIDs among the top-X kept after rerank | Do the papers reach the Extractor? **Main metric.** |
+| Precision@X | share of kept papers that are labeled relevant | Is extraction spent on relevant papers? BioASQ labels are incomplete, so this is a lower bound; the person-labeled sample in §11.3 is the better estimate. |
+| Miss buckets | where each missed relevant PMID was lost (D6 Stage 0, §11.5) | Which fix to try, if recall is low |
+
+**Caveats:**
+- BioASQ questions are often narrower than BioLitSynth's multi-part questions. This is why each one is run as a single sub-question, and why golden-question anchor recall (§11.3) stays as a second check.
+- MedCPT may have been trained or evaluated on BioASQ data (check the MedCPT paper). If so, MedCPT's numbers on BioASQ are optimistic; report this next to every MedCPT result.
+- Labels come only from BioASQ or a person. An agent may write the queries (that is the Query Builder's job) but never the relevant-PMID lists.
 
 ### 11.4 Verifier injection tests (the demo failure check)
 Start from a recorded good run, mutate the claims, and assert that the verifier catches each mutation:
@@ -1037,6 +1065,50 @@ Start from a recorded good run, mutate the claims, and assert that the verifier 
 
 **Metrics reported by `biolitsynth eval`:** injection catch rate (target 100% deterministic, ≥85% LLM-judged), quote match rate (target ≥95% before snapping), citation precision from manual audit of 20 random claim→evidence pairs per golden question (target ≥90%), and LLM calls/tokens per run.
 
+### 11.5 Decision register (every tunable choice is decided by evidence)
+Every workflow choice below that affects quality or cost has a default, a comparison, the data it is judged on, and a decision rule. The defaults elsewhere in this plan are starting values until their row is run.
+
+**Rules:**
+1. **Pre-register.** A row's metric and rule are fixed before its experiment runs. Changing a rule after seeing results needs a written reason in `docs/MODEL_EVAL.md`.
+2. **Dev vs held-back.** Decisions use only the dev data: BioASQ dev (§11.3b) and the recorded golden Q1–Q2 runs. The held-back data (BioASQ held-back, golden Q3–Q4) is used once, in W6, to report final numbers, never to choose.
+3. **Ties go to the cheaper option.** If two options differ by less than 3 percentage points on the main metric, pick the one with fewer LLM calls, less runtime, or less code.
+4. **Record everything** in `docs/MODEL_EVAL.md`, one section per decision ID: options, numbers, date, config hash, and the choice. A row not yet run is marked `untested` there, and its default stays.
+5. **Ground truth is never written by the agent that wrote the code** (CLAUDE.md fixture rule). It comes from BioASQ, a person, or a recorded live run.
+
+The thresholds in the "Rule" column are proposals; the team confirms them before P2.
+
+| ID | Decision (default) | Options compared | Evidence | Main metric | Rule | Phase |
+|---|---|---|---|---|---|---|
+| D1 | Sub-questions per plan (effort rubric: 2–4) | fixed 2 / 3 / 4 vs rubric | Golden Q1–Q2 + anchor PMIDs | Anchor recall over all fetched papers; LLM calls | Smallest count within 3 pts of the best anchor recall | P2 |
+| D2 | Query hit-count refinement (band 20–2,000, ≤2 refines) | first LLM draft only vs refined | BioASQ dev | Recall@fetch | Keep refinement only if it adds ≥3 pts; otherwise drop the loop and save the calls | P2 |
+| D3 | Candidates per query (`retmax_candidates` = 100) | 100 vs 200 | BioASQ dev | Recall@fetch; rerank time | 200 only if it adds ≥3 pts and rerank time stays within budget | P3 |
+| D4 | Rerank and top-X (MedCPT, X = 25) | PubMed order vs MedCPT; X = 25 vs 50 | BioASQ dev + golden anchors | Recall@X, precision@X, extraction calls | Keep MedCPT if recall@25 ≥ PubMed order's and precision@25 is higher; X = 50 only if recall@X rises ≥5 pts. Also report the share of abstracts truncated at 512 tokens | P3 |
+| D5 | Relevance floor (`min_score` = null) | null vs calibrated thresholds | BioASQ dev positives + ~50 person-labeled pairs | Recall of relevant papers | Highest threshold that keeps ≥95% of relevant papers (§5.4c) | P3 |
+| D6 | Retrieval source (Boolean only) | current plan vs hybrid (Boolean + dense, below) | BioASQ dev | Stage 0: share of relevant PMIDs in bucket d; Stage 1: recall@25 | Stage 1 runs only if bucket d holds ≥10% of relevant PMIDs. Adopt the hybrid only if recall@25 rises ≥10 pts, the run stays within the demo time budget, the index fits the demo laptop, and the team approves | P3 (Stage 0); after Gate 1 (Stage 1) |
+| D7 | Abstracts per extraction call (5) | 5 vs 8 | Golden Q1–Q2 + 10 papers whose findings a person listed | Quote match rate; share of the person's findings extracted | 8 only if neither metric drops >2 pts | P3 |
+| D8 | Fuzzy quote snap threshold (95) | 90 / 95 / 98 | Snapped quotes from dev runs, each judged correct or not by a person | Share of snaps that are correct | Lowest threshold with ≥98% correct snaps | P3 |
+| D9 | Coverage gap round (1 round, threshold < 3 items) | no gap round vs 1; threshold 2 / 3 / 5 | Golden dev runs | New relevant independent studies added per gap round; LLM calls | Keep the gap round only if it adds ≥1 relevant study in at least half of the gap cases | P4 |
+| D10 | Study clusterer "likely" rules (§5.4b) | each rule on vs off | Person-made fixture of paper pairs labeled same / different study | Precision and recall of "same study" | Keep a "likely" rule only if its precision is ≥95% | P4 |
+| D11 | Term normalizer (seed map + LLM) | seed only vs seed + LLM | 50 LLM merges, each judged by a person | Merge precision; conflicts found | Keep LLM merges only if precision is ≥95% | P4 |
+| D12 | Conflict balance thresholds (2:1, 4:1) | alternative ratio pairs | Person-assigned balance labels on dev conflicts | Agreement with the person's labels | Thresholds with the highest agreement; defaults on ties | P4 |
+| D13 | Extractor and Critic models (§7) | 2 extractors, 2–3 critics | §11.4 injection suite + quote match on a recorded dev run | Catch rate, false-flag rate, quote match | Highest catch rate that meets the §11.4 targets; ties go to the higher free quota | P6 |
+| D14 | Synthesizer retries (2) | 0 / 1 / 2 | Dev runs | Share of failed claims fixed at each attempt | Keep attempt 2 only if it fixes ≥20% of the claims still failing after attempt 1 | P6 |
+
+**D6 detail: how bucket d is measured (Stage 0, no index needed).** For each BioASQ dev question and each relevant PMID:
+- **a:** in the tuned query's fetched candidates.
+- **b:** matched by the tuned query but beyond the fetch cap.
+- **c:** matched only by a broader query built from the same `key_concepts` (no filters).
+- **d:** matched by neither.
+
+Membership in b and c is tested without downloading full result lists: `esearch` on `(<query>) AND (<pmid1>[pmid] OR <pmid2>[pmid] …)` returns which relevant PMIDs the query matches. Bucket b points to raising the cap (D3), bucket c to better queries (D2), and only bucket d to dense retrieval. Bucket d means "missed by these queries", so a weak broad query inflates it; the broad query is reviewed by a person before Stage 0 runs.
+
+**D6 detail: the hybrid design (built only if D6 triggers).**
+- **Dense branch:** NCBI's precomputed MedCPT article embeddings of PubMed (38 chunks, ~103 GB float32, ~37M PMIDs; the dump ends around early 2024) are streamed once into a FAISS IVF-PQ index (~2.5–3 GB) with PMIDs as the vector IDs. The index is built once, on a laptop or a temporary cloud VM, and used as a local file; it is never hosted as a service. At query time, the MedCPT query encoder embeds the sub-question and the index returns the top 200 PMIDs.
+- **Boolean branch:** a query built in code from `key_concepts` (no LLM): top 200 by PubMed relevance, plus its hit count. It also covers papers newer than the dump.
+- **Merge:** union → efetch (existing fetcher and cache) → dedup + retraction filter → cross-encoder rerank → top-X. `retrieved_by` records `dense`, `boolean`, or both.
+- **Gap signal:** a sub-question is a real gap when the Boolean branch has 0 hits and no dense result clears `min_score`.
+- Before building, verify the embeddings' encoder version, dtype and shape, PMID alignment, normalization, and license.
+
 ---
 
 ## 12. Implementation Phases (for coding agents)
@@ -1047,14 +1119,14 @@ Each phase ends with passing tests and a short demo command. Don't start a phase
 |---|---|---|
 | **P0 Skeleton** | `pyproject`, config loader, all Pydantic schemas, `schema.sql`, tracer, `FakeClient`, CLI stub, LangGraph skeleton with no-op nodes and all routers | `pytest tests/unit/test_schemas.py tests/unit/test_routers.py` passes; `biolitsynth run --dry` walks the full graph (including one forced retry loop) and writes an empty run with trace |
 | **P1 Retrieval** | E-utilities client, rate limiter, XML parser (incl. registry IDs, retraction flags), PubMed cache, dedup + retraction filter | Given a hand-written query, it fetches 25 papers, stores them, and re-runs with 0 network calls; a fixture with a retracted paper drops it |
-| **P2 Plan + Query** | LLM clients (Gemini, OpenAI-compatible for NIM/Groq), LLM cache, Lead plan call, Query Builder with count refinement | Golden Q1 yields 3 sub-questions with distinct facets, and all queries land in 20–2,000 hits |
-| **P3 Rerank + Extraction** | MedCPT reranker (§5.4c) + `min_score` calibration; extractor prompt, batching, quote span validator, strength rules | Anchor-PMID recall after rerank ≥ before rerank on all golden questions; precision@25 improves over PubMed order; rerank of 3×100 candidates completes on the demo laptop (time recorded); ≥95% quote match on golden Q1 and Q2; zero items without valid spans in the store |
-| **P4 Coverage + Clustering + Conflicts** | Lead coverage call + one gap round; study clusterer; term normalizer; conflict grouping, weighting, adjudication | Golden Q2 yields ≥1 confirmed conflict citing both sides with a `balance` label; a hand-made fixture with two PMIDs from one NCT trial produces one study cluster; the Conflicts tab shows weights |
+| **P2 Plan + Query** | LLM clients (Gemini, OpenAI-compatible for NIM/Groq), LLM cache, Lead plan call, Query Builder with count refinement, BioASQ subset + retrieval-only eval (§11.3b) | Golden Q1 yields 3 sub-questions with distinct facets, and all queries land in 20–2,000 hits; recall@fetch on BioASQ dev is reported; D1–D2 recorded in `docs/MODEL_EVAL.md` |
+| **P3 Rerank + Extraction** | MedCPT reranker (§5.4c) + `min_score` calibration; extractor prompt, batching, quote span validator, strength rules | Anchor-PMID recall after rerank ≥ before rerank on all golden questions; precision@25 improves over PubMed order; rerank of 3×100 candidates completes on the demo laptop (time recorded); ≥95% quote match on golden Q1 and Q2; zero items without valid spans in the store; recall@25 on BioASQ dev is reported; D3–D8 recorded (D6 Stage 0 only) |
+| **P4 Coverage + Clustering + Conflicts** | Lead coverage call + one gap round; study clusterer; term normalizer; conflict grouping, weighting, adjudication | Golden Q2 yields ≥1 confirmed conflict citing both sides with a `balance` label; a hand-made fixture with two PMIDs from one NCT trial produces one study cluster; the Conflicts tab shows weights; D9–D12 recorded |
 | **P5 Synthesis + Citation** | Synthesizer, Citation Agent, report assembler (md/json) | Every sentence in `report.md` is either cited or classified as framing |
-| **P6 Verification** | Deterministic checker, Critic, Router, retry loop, model bake-off (§7) | All §11.4 injection tests pass at target rates; `docs/MODEL_EVAL.md` records the chosen critic and extractor models |
+| **P6 Verification** | Deterministic checker, Critic, Router, retry loop, model bake-off (§7) | All §11.4 injection tests pass at target rates; `docs/MODEL_EVAL.md` records the chosen critic and extractor models (D13) and D14 |
 | **P7a API** | FastAPI routes (§16.3), run manager, SSE event stream, query-approval resume, generated TS types | `pytest tests/api` passes; `curl -N /api/runs/{id}/events` streams live stage events; reconnect with `Last-Event-ID` replays missed events |
 | **P7b Web UI** | React app: New Research page, live Run page, Report with citation popovers, Provenance drawer, Conflicts, Papers/Evidence tables, Trace, Rejected claims (§16.4) | Live demo of golden Q1 end to end from the browser; clicking a sentence shows its full provenance chain; demo replay works with the network off |
-| **P8 Hardening (if time)** | Eval command, prompt tuning, resume UX | `biolitsynth eval` prints the §11.4 metrics |
+| **P8 Hardening (if time)** | Eval command, prompt tuning, resume UX | `biolitsynth eval` prints the §11.3b and §11.4 metrics; the held-back sets are run once and their numbers reported |
 
 **Fallback if behind schedule:** keep P1–P3, a simplified P5 with no Citation-Agent LLM step (code-only resolution), deterministic checks only from P6, and a minimal web UI (New Research form + live stepper + Report page with citation popovers; skip the Trace and Papers tabs). That matches the proposal's fallback: abstracts only, 2–3 queries, 25–50 papers each.
 
@@ -1080,7 +1152,7 @@ Each phase ends with passing tests and a short demo command. Don't start a phase
 | Plausible but unsupported cross-paper conclusions | INFERRED requires explicit reasoning steps, ≥2 PMIDs, hedged language, and an independent critic |
 | Hallucinated citations | PMIDs and quotes are copied by code from the store, and the deterministic checker hard-fails unknown IDs |
 | Free-tier quota exhaustion mid-demo | LLM cache, batching, a pre-warmed demo run, and the `--resume` path. Ollama fallback for rehearsal. |
-| PubMed queries miss key papers | Hit-count refinement, coverage-check gap round, and visible queries so users can judge recall |
+| PubMed queries miss key papers | Hit-count refinement, coverage-check gap round, and visible queries so users can judge recall. Recall is measured on BioASQ (§11.3b), and the hybrid dense branch is built if D6 shows Boolean queries miss too much (§11.5) |
 | Subject/outcome normalization misses conflicts | Synonym map plus LLM adjudication. Known limitation, documented in the dashboard. |
 | Critic and Synthesizer share blind spots | Different model families, and the Critic sees only cited evidence plus code-found omissions |
 | Cherry-picked claims pass because the Critic sees only cited evidence | Code-side cherry-pick scan feeds omitted same-topic evidence to the Critic (§5.9) |
@@ -1099,7 +1171,7 @@ Each phase ends with passing tests and a short demo command. Don't start a phase
 | **Cherry-picking** | Code cherry-pick scan + Critic materiality judgment (§5.9, §5.10) | Evidence that was never retrieved can't be detected |
 | **Duplicate / overlapping studies** | Study Clusterer (§5.4b); counting by `study_id`; study-count language check | Meta-analysis ↔ constituent-trial overlap is not detectable from abstracts; Synthesizer told to treat them as overlapping |
 | **Forced resolution of real disagreements** | Code-computed balance; required language per balance class; `false_resolution` check | Thresholds are heuristic; weights are shown so users can judge |
-| **Retrieval recall is unmeasured** | Fetch-wide-then-rerank (MedCPT, §5.4c) so relevant papers ranked low by PubMed still make the cut; query hit-count refinement; coverage gap round; visible queries; optional query approval; anchor-PMID recall in eval (§11.3) | Missing papers outside the queries |
+| **Retrieval recall is hard to measure** | Fetch-wide-then-rerank (MedCPT, §5.4c) so relevant papers ranked low by PubMed still make the cut; query hit-count refinement; coverage gap round; visible queries; optional query approval; recall measured on BioASQ dev and held-back (§11.3b) plus anchor-PMID recall (§11.3); D6 decides whether dense retrieval is needed (§11.5) | BioASQ questions are narrower than real runs, so recall on full multi-part questions is still estimated, not measured |
 | **Retracted papers** | Dropped at dedup; `retraction_guard` check | Retractions not yet indexed in PubMed |
 | **Free-tier fragility** | Two providers, caching, budget guard, demo replay mode (§8.2) | Quota changes before the demo |
 | **LLM non-determinism** | temperature 0, cache-based replay, prompt hashes on spans (§8.2) | Fresh runs can differ slightly |

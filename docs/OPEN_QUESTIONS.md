@@ -74,6 +74,14 @@ contradictions in the plan; the rest are places the plan was silent or loose. Re
   constructs (`tuple` in `refinement_history`, regex `pattern`, `model_validator`), which drafts avoid too.
 - **`FinalReport`** (§5.12) is described but not defined in §4. Define in P5.
 - **Model IDs.** `config.yaml` holds `TODO-verify-*` placeholders until someone checks AI Studio / build.nvidia.com.
+- **Plan v1.5 needs Tony's review (added 2026-11-05).** It adds the §11.5 decision register (D1–D14: every tunable
+  choice decided by a pre-registered experiment), BioASQ as evaluation-only data (§11.3b), and a conditional hybrid
+  dense-retrieval branch that is built only if D6 triggers. To confirm: the proposed thresholds in §11.5, the 30/20
+  BioASQ dev/held-back split, and that BioASQ counts as eval data, not a new source.
+- **BioASQ access and license.** Registration and the data license are unverified. Check both before P2; until then,
+  commit only question IDs (`tests/golden/bioasq_subset.yaml`), never the questions or labels.
+- **A person must pick the BioASQ subset** (selection rules in §11.3b) before any tuning, so the split cannot be
+  shaped by results.
 
 ## Deferred, with a reason
 - **Trace start events (P7a).** Spans are written once, when they end, with `ts` = end time. The live pipeline
