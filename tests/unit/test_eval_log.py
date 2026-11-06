@@ -80,3 +80,23 @@ async def test_backfill_record_round_trips_the_written_json(settings, tmp_path):
     assert back["date"].startswith(report.eval_id[5:9])
     blob = json.dumps(back)
     assert Q1.body not in blob and not any(p in blob for p in Q1.relevant_pmids)
+
+
+def _rec_for(version):
+    from biolitsynth.eval.log import _record
+    return _record(eval_id="e", date=None, split="dev", model="m", prompt_version=version, retmax=1, summary={},
+                   questions=[], config_json=CFG, git_commit=None, git_dirty=None)
+
+
+def test_prompt_hash_is_of_the_version_that_ran():
+    from biolitsynth.llm import load_prompt
+    h1 = load_prompt("query_builder", version=1).hash
+    h2 = load_prompt("query_builder", version=2).hash
+    assert h1 != h2
+    assert _rec_for("query_builder.v1")["prompt_hash"] == h1
+    assert _rec_for("query_builder.v2")["prompt_hash"] == h2
+
+
+@pytest.mark.parametrize("version", ["query_builder.v99", "garbage"])
+def test_prompt_hash_none_when_version_unknown(version):
+    assert _rec_for(version)["prompt_hash"] is None

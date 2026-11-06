@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..agents import query_builder as qbuild
 from ..llm import load_prompt
+from ..llm.prompts import PromptError
 
 DEFAULT_LOG = Path("docs/eval_log.jsonl")
 
@@ -39,11 +40,22 @@ def _per_question(q: dict) -> dict:
             "misses_beyond_cap": m.count("beyond_cap"), "misses_not_matched": m.count("not_matched")}
 
 
+def _prompt_hash(prompt_version: str) -> str | None:
+    """Hash of the exact prompt version the eval ran ("<name>.v<int>"); None if unparseable or the file is gone."""
+    m = re.fullmatch(r"(?P<name>.+)\.v(?P<n>\d+)", str(prompt_version))
+    if not m or m["name"] != qbuild.PROMPT:
+        return None
+    try:
+        return load_prompt(qbuild.PROMPT, version=int(m["n"])).hash
+    except PromptError:
+        return None
+
+
 def _record(*, eval_id, date, split, model, prompt_version, retmax, summary, questions: list[dict],
             config_json: str, git_commit, git_dirty, **extra) -> dict:
     return {"eval_id": eval_id, "date": date, "split": split, "n_questions": len(questions),
             "question_ids": [q["id"] for q in questions], "model": model, "prompt_version": prompt_version,
-            "prompt_hash": load_prompt(qbuild.PROMPT).hash, "config_hash": config_hash(config_json),
+            "prompt_hash": _prompt_hash(prompt_version), "config_hash": config_hash(config_json),
             "retmax": retmax, "git_commit": git_commit, "git_dirty": git_dirty, "summary": summary,
             "per_question": {q["id"]: _per_question(q) for q in questions}, **extra}
 
@@ -63,7 +75,7 @@ def record_from_report(report, settings, *, config_json: str) -> dict:
 
 def record_from_retrieval_json(path: str | Path, config_json: str) -> dict:
     """Backfill from a written retrieval.json. The date comes from the eval id; git fields are unknown; the prompt
-    hash is that of the prompt file as it is now."""
+    hash is that of the prompt version named in the file."""
     d = json.loads(Path(path).read_text())
     m = re.match(r"eval_(\d{8})_(\d{6})_", d["eval_id"])
     date = (datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
