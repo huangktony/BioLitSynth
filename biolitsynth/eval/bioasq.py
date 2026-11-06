@@ -12,6 +12,7 @@ import json
 import random
 import re
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -26,6 +27,11 @@ class BioasqQuestion:
     body: str
     type: str
     relevant_pmids: tuple[str, ...]
+
+
+def created_on(question_id: str) -> date:
+    """BioASQ ids are MongoDB ObjectIds: the first 8 hex digits are the creation time in seconds since 1970."""
+    return datetime.fromtimestamp(int(question_id[:8], 16), timezone.utc).date()
 
 
 def load_bioasq(path: str | Path) -> dict[str, BioasqQuestion]:
@@ -47,15 +53,18 @@ def file_sha256(path: str | Path) -> str:
 
 
 def select_subset(questions: dict[str, BioasqQuestion], *, n: int = 50, dev: int = 30, seed: int = 0,
-                  min_relevant: int = 5, types: tuple[str, ...] = TYPES, exclude: set[str] = frozenset()) -> dict:
-    """`exclude`: ids already used by another subset (a check set must never overlap dev or held-back)."""
+                  min_relevant: int = 5, types: tuple[str, ...] = TYPES, exclude: set[str] = frozenset(),
+                  created_after: date | None = None) -> dict:
+    """`exclude`: ids already used by another subset (a check set must never overlap dev or held-back).
+    `created_after`: only questions created on or after this date (e.g. after a model's release)."""
     eligible = sorted(q.id for q in questions.values() if q.type in types and len(q.relevant_pmids) >= min_relevant
-                      and q.id not in exclude)
+                      and q.id not in exclude and (created_after is None or created_on(q.id) >= created_after))
     if len(eligible) < n:
         raise ValueError(f"only {len(eligible)} questions meet the rules, need {n}")
     picked = random.Random(seed).sample(eligible, n)
     return {"rules": {"types": list(types), "min_relevant_pmids": min_relevant, "n": n, "seed": seed,
-                      "excluded": len(exclude)},
+                      "excluded": len(exclude),
+                      "created_after": created_after.isoformat() if created_after else None},
             "dev": picked[:dev], "held_back": picked[dev:]}
 
 

@@ -1,4 +1,4 @@
-# Handoff and TODO (Thu Nov 5, 2026)
+# Handoff and TODO (Thu Nov 5, 2026, updated after the BioASQ runs)
 
 Read this first, then `docs/OPEN_QUESTIONS.md` ("P2 status"), then `docs/IMPLEMENTATION_PLAN.md` v1.5 (§11.3b, §11.5,
 §12). `docs/ROADMAP.md` still has the weekly calendar; where it and this file disagree on status, this file is newer.
@@ -6,8 +6,9 @@ Read this first, then `docs/OPEN_QUESTIONS.md` ("P2 status"), then `docs/IMPLEME
 There are two task tracks below:
 - **Track A, Boolean only:** the current plan. PubMed Boolean queries → MedCPT cross-encoder rerank → extraction.
   This is what gets built.
-- **Track B, Hybrid:** adds a dense MedCPT branch over all of PubMed. Built **only if** decision D6 (§11.5) shows
-  Boolean queries miss too many relevant papers, **and** Tony approves. Until then, nothing in Track B is built.
+- **Track B, Hybrid:** adds a dense MedCPT branch over all of PubMed. Proposed as a **direct head-to-head comparison**
+  (`docs/PROPOSAL_RETRIEVAL_COMPARISON.md`) instead of the old bucket-test gate. Nothing in Track B is built until
+  Tony approves the proposal.
 
 ---
 
@@ -17,7 +18,7 @@ There are two task tracks below:
 |---|---|
 | P0 Skeleton | Accepted |
 | P1 Retrieval | Accepted |
-| P2 Plan + Query | **Code complete, waiting for acceptance** (needs the BioASQ dev run, below) |
+| P2 Plan + Query | **Code complete, waiting for acceptance.** BioASQ dev run done: D2 provisional, QB-v2 not adopted |
 | P3 to P8 | Not started. Do not start P3 until Tony says "accepted" for P2 |
 
 What runs for real today (`biolitsynth run "<question>"`, no `--dry`):
@@ -30,6 +31,11 @@ Also real but not wired into the graph yet (no real claims exist before P5):
 - Seven schema-only deterministic checks (`checks/deterministic.py`, §5.9).
 - BioASQ retrieval eval (`biolitsynth eval select | retrieval`, §11.3b).
 - OpenAI-compatible client for NIM / Groq (no key yet, mock-tested only).
+
+BioASQ results so far (`docs/MODEL_EVAL.md`): Query Builder v1 reaches mean recall 0.29 (dev) / 0.47 (check set) in
+PubMed's top 100. Refinement added nothing (D2, provisional). Prompt v2 matched more relevant papers but not in the
+top 100, so it was not adopted; `config.yaml` pins `query_builder: 1`. The queries match 70-86% of relevant papers
+at any depth, but only 10-15% are in PubMed's top 25: **ranking is the main loss**, which P3 and the proposal target.
 
 Live check, golden Q1 (2026-11-05, `gemini-3.8-flash`): 3 sub-questions with distinct facets (clinical_outcome,
 mechanism, epidemiology), 1 bridge, queries at 127 / 469 / 417 hits on the first draft, 271 papers after dedup.
@@ -64,6 +70,10 @@ Output: `runs/<run_id>/` (plan and query snapshots, `trace.jsonl`) and `data/bio
 - [ ] **Gemini free-tier limit** for `gemini-3.8-flash`: set `providers.gemini.rpm` from AI Studio (10 is a guess).
 - [ ] **NVIDIA NIM key** (phone verification) and a verified critic model id, before P6.
 - [ ] **Confirm the §11.5 thresholds** (3 / 5 / 10 points, 95% / 98%) before their experiments run.
+- [ ] **Review the BioASQ dev subset** (`tests/golden/bioasq_subset.yaml`) and set `reviewed_by`. It was used before
+      review, so D2 is provisional until the review keeps the same 30 questions (or the eval is rerun).
+- [ ] **Tony decides on `docs/PROPOSAL_RETRIEVAL_COMPARISON.md`** (overrides §1.2 and the D6 gate; widens D3).
+- [ ] **Tony confirms or overrides D2** (the rule says drop query refinement: +0.0 points on BioASQ dev).
 
 ---
 
@@ -72,8 +82,9 @@ Output: `runs/<run_id>/` (plan and query snapshots, `trace.jsonl`) and `data/bio
 Each phase ends with: tests green, the acceptance demo run live for Tony, a commit, then stop until "accepted".
 
 ### P2 acceptance (finish now)
-- [ ] `biolitsynth eval retrieval --bioasq <file> --split dev` → record **D2** (draft vs refined recall@fetch) in
-      `docs/MODEL_EVAL.md` (create it; one section per decision id, §11.5 rule 4).
+- [x] `biolitsynth eval retrieval --bioasq data/eval/bioasq/training14b.json --split dev` → **D2** recorded in
+      `docs/MODEL_EVAL.md` (provisional; refinement +0.0 points).
+- [x] QB-v2 prompt tested on dev + an unseen check set under a pre-registered rule: **not adopted**.
 - [ ] **D1** (2 / 3 / 4 sub-questions vs the rubric): needs anchor PMIDs. Add a small golden-question eval that
       reports anchor recall over all fetched papers per setting.
 - [ ] Demo to Tony: golden Q1 live (above) + the BioASQ dev summary.
@@ -83,10 +94,12 @@ Each phase ends with: tests green, the acceptance demo run live for Tony, a comm
       fallback to PubMed order if the model can't load (§5.4c). New deps: `torch`, `transformers`. Check the license.
 - [ ] Real `rerank` node: top-X per sub-question, `kept` / `drop_reason` stored, never deleted.
 - [ ] Extend the retrieval eval with **recall@25 after rerank** and precision@25 (the main §11.3b metric).
-- [ ] **D3** (100 vs 200 candidates), **D4** (rerank on/off, X = 25 vs 50, share truncated at 512 tokens),
-      **D5** (`min_score` from BioASQ positives + ~50 person-labeled pairs).
-- [ ] **D6 Stage 0** (bucket test, no index): add a broad code-built query from `key_concepts`, split
-      `not_matched` misses into buckets c and d. **This decides whether Track B ever starts.**
+- [ ] **D3** (100 / 200, and 500 / 1,000 if the proposal is approved), **D4** (rerank on/off, X = 25 vs 50, share
+      truncated at 512 tokens), **D5** (`min_score` from BioASQ positives + ~50 person-labeled pairs).
+- [ ] Two-stage rerank (article-encoder similarity → top 100 → cross-encoder) if the cross-encoder alone is too slow
+      on deep pools.
+- [ ] **D6:** if the proposal is approved, Track B's comparison replaces the bucket test. If not, run the bucket test
+      as §11.5 describes (broad code-built query from `key_concepts`, split `not_matched` into buckets c and d).
 - [ ] Extractor: `prompts/extractor.v1.md`, an `EvidenceDraft` schema (no ids, offsets, strength, study_id),
       batches of 5, wired to the quote validator (one re-extract, then drop, log `validation.quote_*`).
 - [ ] Strength rules in code (§4.3). Seed `StudyDesign` from publication types (deferred from P1, item 18).
@@ -126,21 +139,27 @@ Each phase ends with: tests green, the acceptance demo run live for Tony, a comm
 
 ---
 
-## Track B: Hybrid (Boolean + dense MedCPT), conditional
+## Track B: Hybrid (Boolean + dense MedCPT), via a direct comparison
 
-**Gate to start:** D6 Stage 0 (Track A, P3) shows bucket d holds **≥10%** of relevant BioASQ dev PMIDs, and Tony
-approves the scope change (§1.2 exception, §11.5 D6). If Stage 0 shows less, close this track and delete nothing
-from Track A.
+**Gate to start:** Tony approves `docs/PROPOSAL_RETRIEVAL_COMPARISON.md`. It compares, with everything else held
+fixed (same Query Builder, same cross-encoder, same cut to 25 papers):
+1. **Boolean, deep:** top 500 / 1,000 by PubMed order → cross-encoder → top 25.
+2. **Full-corpus MedCPT:** top 200 / 1,000 from an IVF-PQ index over ~37M PubMed vectors → cross-encoder → top 25.
+3. **Hybrid:** union of 1 (top 500) and 2 (top 200) → cross-encoder → top 25.
 
-Design summary (§11.5, "D6 detail"): dense branch = MedCPT query encoder → FAISS IVF-PQ over NCBI's precomputed
-PubMed article embeddings → top 200 PMIDs; Boolean branch = code-built query from `key_concepts`, top 200 + hit
-count, also covers papers newer than the dump; union → efetch → dedup → cross-encoder → top-X.
+Adopt the hybrid only if recall@25 beats the best Boolean setting by **≥ 10 points** on the any-date set, is **not
+lower** on the post-2023 set, retrieval for 3 sub-questions takes **≤ 2 minutes**, and the index is **≤ 5 GB**
+(full rule in the proposal, §4). The two comparison sets are already drawn and committed:
+`tests/golden/bioasq_compare_all.yaml` (50) and `tests/golden/bioasq_compare_recent.yaml` (50, created ≥ 2023-08-01).
+Neither overlaps dev, held-back or the check set.
+
+Depends on: P3's cross-encoder (all options use it). Runs alongside the extractor work.
 
 ### B0 Verify the data (minutes, a few KB)
 - [ ] Header check on one chunk: `curl -s -r 0-127 <base>/embeds_chunk_0.npy | strings` → expect `'<f4'`, `(~950000, 768)`.
 - [ ] `len(pmids_chunk_0.json) == rows`. Check vector norms on a sample (inner product, normalize or not).
 - [ ] Confirm in the MedCPT README that the vectors come from the same `ncbi/MedCPT-Article-Encoder` as the
-      Hugging Face weights, and check the license.
+      Hugging Face weights, check the license, and check whether MedCPT was trained or evaluated on BioASQ.
 - [ ] Record the dump date: chunks 0-36 are Oct 2023, chunk 37 Mar 2024, so the index ends around early 2024.
 
 ### B1 Build the index once (local or a temporary cloud VM; same script)
@@ -152,27 +171,23 @@ count, also covers papers newer than the dump; union → efetch → dedup → cr
       `n2-standard-8`, 100 GB disk), copy the index down, delete the VM. Nothing stays hosted.
 - [ ] Store at `data/medcpt/` (gitignored). New dep: `faiss-cpu` (pin an exact version at least 2 weeks old).
 
-### B2 Dense branch in the pipeline
-- [ ] `retrieval/dense.py`: load the index with `IO_FLAG_MMAP`, MedCPT query encoder (shared with the reranker's
-      model loading), `search(sub_question_text, k=200, nprobe=32) → PMIDs`. Trace span per search.
-- [ ] Code-built Boolean query from `key_concepts` (no LLM), plus a recency clause from `index_meta.json`'s dump date.
-      Decide with Tony whether the LLM Query Builder stays (D2 result) or is replaced by the code-built query.
-- [ ] Merge node: union per sub-question, `retrieved_by` gains `dense` / `boolean`, then the existing efetch →
+### B2 Code for the comparison
+- [ ] `retrieval/dense.py`: load the index with `IO_FLAG_MMAP`, MedCPT query encoder (shared model loading with the
+      reranker), `search(sub_question_text, k, nprobe=32) → PMIDs`. Trace span per search.
+- [ ] Merge step: union per sub-question, `retrieved_by` gains `dense` / `boolean`, then the existing efetch →
       dedup → rerank. A parallel-written key needs the `merge_unique` reducer (CLAUDE.md graph rules).
-- [ ] Gap signal: a sub-question is a GAP when Boolean has 0 hits and no dense result clears `min_score`.
-- [ ] Config: `retrieval: {mode: boolean | hybrid, dense_k: 200, nprobe: 32, index_path: ...}`. Default `boolean`.
+- [ ] Eval: `biolitsynth eval retrieval --mode boolean|dense|hybrid --depth N`, reporting recall@25 after rerank,
+      precision@25, pool recall, unique relevant per branch, wall time, and "relevant PMIDs in the index".
 - [ ] Tests: a tiny FAISS index built in the test from random vectors with known nearest neighbours; merge and
       provenance tests on the mock NCBI. No real index in CI.
 
-### B3 Stage 1 comparison (decides adoption)
-- [ ] Same BioASQ dev questions through: current plan / B (Boolean + exact kNN on precomputed vectors) /
-      A (hybrid) / dense only. Report recall@25 after rerank, unique relevant papers per branch, latency, disk, RAM.
-- [ ] Note next to every MedCPT number that MedCPT may have seen BioASQ data (§11.3b caveat).
-- [ ] Adopt only if recall@25 rises **≥10 points**, the run stays within the demo time budget, and the index fits on
-      the demo laptop (§11.5 D6). Record the result in `docs/MODEL_EVAL.md` either way.
-- [ ] If adopted: update §1.2, §5.2-5.4c and the §3 diagram, bump the plan version, and get Tony's sign-off.
-
----
+### B3 Run and decide
+- [ ] Both comparison sets, all three options (and Query Builder v2 on option 1 as the secondary row). One run per
+      option, no tuning between runs. Record everything in `docs/MODEL_EVAL.md`.
+- [ ] Apply the proposal's rule. If the hybrid is adopted: config `retrieval: {mode: hybrid, ...}`, code-built
+      Boolean branch with a recency clause from the dump date, gap signal (Boolean 0 hits and no dense result above
+      `min_score`), update plan §1.2, §1.3, §5.2-5.4c, §11.5 and the §3 diagram, bump to v1.6.
+- [ ] If not adopted: keep Boolean, set the candidate depth from D3, close Track B.
 
 ## Rules that bite
 

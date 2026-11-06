@@ -8,6 +8,7 @@ A decision is final only when the team confirms it. Rows not yet run are `untest
 | D1 | untested (needs golden-question anchor PMIDs) |
 | D2 | **run, provisional** (subset not yet reviewed by a person) |
 | QB-v2 | **run 2026-11-05: not adopted** (fails rules a and b); `query_builder` stays pinned to v1 |
+| RC | **proposed** (retrieval comparison, `docs/PROPOSAL_RETRIEVAL_COMPARISON.md`); rule fixed there; needs Tony's approval |
 | D3-D14 | untested |
 
 ---

@@ -57,3 +57,14 @@ def test_a_check_set_never_overlaps_the_excluded_ids(tmp_path):
     used = set(first["dev"] + first["held_back"])
     check = select_subset(loaded, n=30, dev=30, seed=1, exclude=used)
     assert len(check["dev"]) == 30 and check["held_back"] == [] and not used & set(check["dev"])
+
+
+def test_creation_date_comes_from_the_object_id_and_filters_selection(tmp_path):
+    from datetime import date
+    from biolitsynth.eval.bioasq import created_on
+    assert created_on("58bc696b02b8c60953000005") == date(2017, 3, 5)
+    old = [{**q(i), "id": f"58bc696b{i:016x}"} for i in range(40)]
+    new = [{**q(i), "id": f"67d723d9{i:016x}"} for i in range(40, 80)]
+    loaded = load_bioasq(bioasq_file(tmp_path, old + new))
+    s = select_subset(loaded, n=30, dev=30, created_after=date(2023, 8, 1))
+    assert all(i.startswith("67d723d9") for i in s["dev"]) and s["rules"]["created_after"] == "2023-08-01"

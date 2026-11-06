@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> int:
     sel.add_argument("--dev", type=int, default=30, help="how many of the n go to dev; the rest to held_back")
     sel.add_argument("--exclude", action="append", default=[], metavar="SUBSET_YAML",
                      help="never pick ids already in this subset file (repeatable)")
+    sel.add_argument("--created-after", default=None, metavar="YYYY-MM-DD",
+                     help="only questions created on or after this date (from the BioASQ id's timestamp)")
     ret = evs.add_parser("retrieval", help="retrieval-only eval on a BioASQ split: recall@fetch, draft vs refined")
     ret.add_argument("--bioasq", required=True)
     ret.add_argument("--subset", default="tests/golden/bioasq_subset.yaml")
@@ -111,7 +113,9 @@ def _eval(args) -> int:
     questions = load_bioasq(args.bioasq)
     if args.eval_cmd == "select":
         exclude = {i for f in args.exclude for s in [load_subset(f)] for i in s["dev"] + s["held_back"]}
-        subset = select_subset(questions, n=args.n, dev=args.dev, seed=args.seed, exclude=exclude)
+        from datetime import date
+        after = date.fromisoformat(args.created_after) if args.created_after else None
+        subset = select_subset(questions, n=args.n, dev=args.dev, seed=args.seed, exclude=exclude, created_after=after)
         write_subset(subset, args.bioasq, args.out)
         print(f"wrote {args.out}: {len(subset['dev'])} dev, {len(subset['held_back'])} held-back question ids")
         print("A person reviews the list and sets reviewed_by before any tuning.")

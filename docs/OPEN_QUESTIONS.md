@@ -169,6 +169,10 @@ Still open:
   run `biolitsynth eval select --bioasq <file>`, review the ids and set `reviewed_by`, then
   `biolitsynth eval retrieval --bioasq <file> --split dev`. That gives D2. **D1** also needs the golden questions'
   anchor PMIDs, which a person picks.
+- **Retrieval comparison proposal** (`docs/PROPOSAL_RETRIEVAL_COMPARISON.md`, 2026-11-05): Boolean deep vs
+  full-corpus MedCPT vs hybrid, all cut to 25 after the same cross-encoder, with a pre-registered rule and two BioASQ
+  sets drawn in advance (one created after MedCPT's release). Needs Tony's approval; it overrides §1.2 and replaces the
+  D6 bucket-test gate. `eval select` gained `--created-after` (BioASQ ids carry their creation time).
 - **Live check done 2026-11-05** with `gemini-3.8-flash` (picked from `models.list` as the newest stable Flash;
   `models.query` only, the other roles still hold placeholders). Results:
   - metformin/CRC, 2 sub-questions: both queries valid, all key concepts present, in band on the first draft
