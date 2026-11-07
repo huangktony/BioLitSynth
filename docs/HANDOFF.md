@@ -155,21 +155,32 @@ Neither overlaps dev, held-back or the check set.
 
 Depends on: P3's cross-encoder (all options use it). Runs alongside the extractor work.
 
-### B0 Verify the data (minutes, a few KB)
-- [ ] Header check on one chunk: `curl -s -r 0-127 <base>/embeds_chunk_0.npy | strings` → expect `'<f4'`, `(~950000, 768)`.
-- [ ] `len(pmids_chunk_0.json) == rows`. Check vector norms on a sample (inner product, normalize or not).
-- [ ] Confirm in the MedCPT README that the vectors come from the same `ncbi/MedCPT-Article-Encoder` as the
-      Hugging Face weights, check the license, and check whether MedCPT was trained or evaluated on BioASQ.
-- [ ] Record the dump date: chunks 0-36 are Oct 2023, chunk 37 Mar 2024, so the index ends around early 2024.
+### B0 Verify the data (done 2026-11-06)
+- [x] Chunks are `float32`, shape `(N, 768)`, `N` = `len(pmids_chunk_N.json)` (checked on every chunk by the build).
+- [x] Vector norms are not 1 (sample of 5,000 from chunk 37: min 8.18, median 8.95, max 9.93). MedCPT scores by raw
+      inner product, so the index uses inner product on unnormalized vectors.
+- [x] License: US Government Work, public domain (`LICENSE` in github.com/ncbi/MedCPT; HF cards say
+      `license_name: public-domain`). Cite Jin et al. 2023 wherever the index is published. MedCPT was trained on
+      PubMed search logs; its paper reports zero-shot results on BEIR, which includes a BioASQ task, so treat older
+      BioASQ questions as possibly seen (the recent set covers this).
+- [x] Dump dates: chunks 0-36 2023-10-28, chunk 37 2024-03-24. Nothing newer is in the index.
 
-### B1 Build the index once (local or a temporary cloud VM; same script)
-- [ ] `scripts/build_medcpt_index.py` (outside the package): train IVF-PQ (`nlist` 32768, `m` 64) on a ~2M-vector
-      sample spread across chunks, then stream chunks one at a time with `add_with_ids(vectors, pmids)`, deleting each
-      chunk after. Peak disk ~10-15 GB, not 103 GB. Output `pubmed_ivfpq.faiss` (~2.5-3 GB) + `index_meta.json`
-      (model, dump date, params, count).
-- [ ] Where: laptop (download ~103 GB over a few hours) or a temporary VM near NCBI (e.g. GCP `us-east4`,
-      `n2-standard-8`, 100 GB disk), copy the index down, delete the VM. Nothing stays hosted.
-- [ ] Store at `data/medcpt/` (gitignored). New dep: `faiss-cpu` (pin an exact version at least 2 weeks old).
+### B1 Build the index once (done 2026-11-06)
+- [x] `scripts/build_medcpt_index.py`: `IVF32768,PQ64`, inner product, trained on 2,000,000 vectors (400,000 from
+      each of chunks 3, 12, 21, 30, 36), then all 38 chunks streamed in with `add_with_ids`. Built on a Kaggle CPU
+      notebook in about 6 hours (training 1.7 h, ~6.5 min per chunk). faiss-cpu 1.15.1.
+- [x] Result: **35,920,666 vectors, 2.69 GB**, at `data/medcpt/pubmed.ivfpq` + `data/medcpt/state.json` (build
+      record: chunks, count, params, model, dump dates). sha256 `1964805fc51a96b264f98b90b15a3437c91ce835bac1fb8f80479e58f9fddad6`.
+- [x] Copy on Hugging Face (private for now): `huangktony/medcpt-pubmed-ivfpq` (dataset repo, with a card and citation).
+- [x] Build check (200 article vectors from chunk 18 as stand-in queries):
+
+      | nprobe | own article in top 10 | exact top 10 in IVF-PQ top 1,000 (one chunk) | ms/query |
+      |---|---|---|---|
+      | 16 | 98.5% | 80.9% | 3.7 |
+      | 64 | 98.5% | 91.7% | 5.0 |
+      | 256 | 98.5% | 96.7% | 10.9 |
+
+      **`nprobe` = 256** for the comparison, fixed here from the build check, before any BioASQ question is run.
 
 ### B2 Code for the comparison
 - [ ] `retrieval/dense.py`: load the index with `IO_FLAG_MMAP`, MedCPT query encoder (shared model loading with the
