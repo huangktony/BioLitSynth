@@ -1,14 +1,28 @@
-# Handoff and TODO (Thu Nov 5, 2026, updated after the BioASQ runs)
+# Handoff and TODO (updated Mon Nov 16, 2026)
 
-Read this first, then `docs/OPEN_QUESTIONS.md` ("P2 status"), then `docs/IMPLEMENTATION_PLAN.md` v1.5 (§11.3b, §11.5,
+## Start here (next session, Nov 16)
+
+1. **P2 is accepted (Tony, 2026-11-16). P3 is in progress. Gate 1 is Fri Nov 20.**
+2. **Next action:** the P3 build plan below ("P3 build plan: rerank node + extractor") is drafted and **waiting for
+   Tony's go**, including two choices he has not confirmed yet (quote retry inside the extract node; strength
+   cut-offs). Ask once, then implement: Tony wants the main session to plan and review, and code written by Sonnet
+   subagents (one writes code, a separate one writes tests from the same spec).
+3. **People items before P5** (see "Reviewer feedback"): review-anchored questions with committed conclusions and
+   required PMIDs (candidate reviews are listed), the contradiction case, the work split, a contact email.
+4. **Track B:** code done, benchmark (B3) not run. Can run in the background; it must not delay Gate 1.
+5. Local notes: `rg` is not on PATH in this shell after the OS update (use `grep`). Agents cannot write
+   `.claude/settings.local.json` (blocked by the auto-mode classifier); Tony adds permission rules himself.
+
+
+Read this file first, then `docs/OPEN_QUESTIONS.md`, then `docs/IMPLEMENTATION_PLAN.md` v1.5 (§11.3b, §11.5,
 §12). `docs/ROADMAP.md` still has the weekly calendar; where it and this file disagree on status, this file is newer.
 
 There are two task tracks below:
 - **Track A, Boolean only:** the current plan. PubMed Boolean queries → MedCPT cross-encoder rerank → extraction.
   This is what gets built.
 - **Track B, Hybrid:** adds a dense MedCPT branch over all of PubMed. Proposed as a **direct head-to-head comparison**
-  (`docs/PROPOSAL_RETRIEVAL_COMPARISON.md`) instead of the old bucket-test gate. Nothing in Track B is built until
-  Tony approves the proposal.
+  (`docs/PROPOSAL_RETRIEVAL_COMPARISON.md`) instead of the old bucket-test gate. Approved by Tony on 2026-11-06;
+  B0-B2 are done, B3 (the benchmark run) is next.
 
 ---
 
@@ -163,7 +177,7 @@ not write these expected answers):
 
 Each phase ends with: tests green, the acceptance demo run live for Tony, a commit, then stop until "accepted".
 
-### P2 acceptance (finish now)
+### P2 acceptance (accepted by Tony 2026-11-16; open items below carry into P3)
 - [x] `biolitsynth eval retrieval --bioasq data/eval/bioasq/training14b.json --split dev` → **D2** recorded in
       `docs/MODEL_EVAL.md` (provisional; refinement +0.0 points).
 - [x] QB-v2 prompt tested on dev + an unseen check set under a pre-registered rule: **not adopted**.
@@ -172,6 +186,66 @@ Each phase ends with: tests green, the acceptance demo run live for Tony, a comm
 - [ ] Demo to Tony: golden Q1 live (above) + the BioASQ dev summary.
 
 ### P3 Rerank + Extraction (Gate 1, Fri Nov 20)
+
+#### P3 build plan: rerank node + extractor (drafted 2026-11-16, waiting for Tony's go)
+How we'll know it works: offline tests pass with `FakeReranker` and scripted extractor replies; then a live golden
+Q1 run goes past dedup through rerank, extraction and the quote audit and stops, showing ≤25 kept papers per
+sub-question, stored evidence items whose spans all re-verify against their abstracts, and the quote match rate
+(Gate 1 needs ≥95%).
+
+1. **Rerank node** (`graph/nodes.py`, replaces the stub). Per sub-question: candidates = papers retrieved by that
+   sub-question's queries (via `run_papers` → `queries.sub_question_id`), minus `dropped_pmids`. Query text =
+   `rerank.query_text(sq)` (text + key concepts). `score_with_cache`, then `select_top(top_x =
+   limits.papers_per_query, min_score = rerank.min_score (null for now), pubmed_rank = best rank over that
+   sub-question's queries)`. Upsert every `RelevanceScore` into `relevance_scores` (never delete). Return
+   `kept_pmids` = union of kept over sub-questions (`merge_unique` key). One span per sub-question:
+   "sq1: 100 candidates → 25 kept". Re-running in a gap round rescores all sub-questions (cache makes it free);
+   the extract router already skips `extracted_pmids`.
+   - Model loaded once per process: `Deps.reranker` (tests inject `FakeReranker`), built from `settings.rerank`
+     where `Deps` is created (`graph/runner.py`, and the FastAPI app).
+   - Fallback (§5.4c): if the model fails to load or score, log `rerank.fallback`, keep PubMed's top-X per
+     sub-question, store rows with `model = "fallback:pubmed_order"`, and continue. A dry run keeps the stub.
+2. **Extractor** (`agents/extractor.py`, `prompts/extractor.v1.md`, new `EvidenceDraft` in `schemas/drafts.py`).
+   - Draft fields (what the model may decide): pmid (must be one of the batch), statement, quote, subject, outcome,
+     direction, effect_size, population, organism, study_design, sample_size, cohort_or_trial_name, limitations.
+     Code sets: id `ev_<pmid>_<n>`, `sub_question_ids` (the ones the paper was kept for, from `relevance_scores`),
+     quote offsets, lowercased subject/outcome, strength, `study_id` (later), `extractor_model`, `prompt_version`.
+   - Prompt rules (§5.5): quote copied character for character from the abstract; 1-5 atomic findings per paper,
+     zero if none is relevant; no outside knowledge; background and speculation are not findings. User message:
+     the sub-questions, then each abstract in `<abstract pmid="...">` tags with title and PubMed publication types
+     (a hint for `study_design`, deferred item 18). Prompt structure like `prompts/query_builder.v1.md`.
+   - Batches of `limits.abstracts_per_extraction` (5) via the existing `fan_out_extract` Send fan-out.
+   - `models.extractor`: the newest Gemini Flash-Lite, ID read from the live `models.list` (never guessed; no
+     `-latest` or `-preview`). Record live extractor replies as fixtures once the first live run works.
+3. **Quote checking: proposed change, needs Tony's OK.** OPEN_QUESTIONS items 7 and 28 put "re-extract once, then
+   drop" in the `quote_check` node. Proposal: do it inside the `extract` node instead. Validate every quote with
+   `checks.quote_span.validate_quote` right away (exact → keep; fuzzy ≥95 → snap, log `validation.quote_snapped`);
+   if any quote of a paper fails, re-extract that one paper once, then drop what still fails (log
+   `validation.quote_dropped`). Only verified items are stored, and retries run in parallel. `quote_check` becomes
+   an independent audit: re-verify every stored item's span against its abstract, compute the match rate (exact /
+   snapped / dropped), and raise on any mismatch. Record the change as a new OPEN_QUESTIONS item.
+4. **Strength rules (§4.3) in code: proposed cut-offs, needs Tony's OK** (the plan's table says "low-moderate"
+   for one cell). Human only; anything else is low.
+
+   | Design | Strength |
+   |---|---|
+   | meta-analysis, systematic review | high |
+   | RCT, n ≥ 50 or n unknown | high |
+   | RCT, n < 50 | moderate |
+   | cohort / case-control, n ≥ 1,000 | moderate |
+   | cohort / case-control with smaller or unknown n, cross-sectional, other | low |
+   | animal, in vitro, computational, case report, narrative review (any organism) | low |
+5. **Live stop point:** `LIVE_STOP_AFTER` in `graph/runner.py` moves from `dedup` to `quote_check` (coverage onward
+   are still stubs).
+6. **Tests** (separate agent, from the spec only): rerank node with `FakeReranker` (per-sub-question top-X, rows
+   stored, union of kept, fallback path, gap-round rerun); strength table; extractor draft → item mapping; quote
+   flow (exact, snap, one re-extract, drop) with scripted replies; the audit raising on a corrupted span; live stop
+   point. Hand-checked expected quotes come from real abstracts in `tests/fixtures/pubmed` and need Tony's approval.
+
+Not in this step: `min_score` calibration (D5), D3/D4, the thin-slice Synthesizer and `report.md` (next, still
+before Gate 1).
+
+#### P3 checklist
 - [~] `rerank/`: done for Track B (commit `49e3f5a`): cross-encoder wrapper with device select, `FakeReranker`,
       `select_top` (§5.4c keep/drop rules), score cache in a global `rerank_cache` table (not the run-scoped
       `relevance_scores`; the graph node should still write `relevance_scores` per run). License checked: public domain.
