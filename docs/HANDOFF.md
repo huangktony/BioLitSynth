@@ -61,6 +61,53 @@ Then:
 
 Output: `runs/<run_id>/` (plan and query snapshots, `trace.jsonl`) and `data/biolitsynth.db`. Both are gitignored.
 
+## Reviewer feedback: Emmett Witchel, Tue Nov 10, 2026 (not yet addressed)
+
+> Your main check depends on your system's own verification step, so it cannot show that the verifier itself is
+> wrong. Pick two or three questions that a published systematic review already answers, and commit, before you build
+> the pipeline, the conclusion each must reach and the PMIDs it must cite. Do the same for the contradiction case by
+> naming the papers you plant and the disagreement the output must report. State what agent output you will reject,
+> for example any conclusion whose cited abstract does not contain the supporting finding. Name the LLM you will use
+> and record its responses and the PubMed results, so the demo and checks rerun without live API calls. Say how the
+> two of you will split the work, and add a contact email.
+
+He is right about the main gap: today every end-to-end check (Critic, §11.4 injection tests, Gate 2 catch rate) is
+judged by our own pipeline, and the golden questions (§11.3) list only "expected properties" (e.g. "≥1 CONTESTED
+claim"), not answers fixed in advance. Each point, what exists, and what is missing:
+
+| # | He asks for | What exists now | Missing |
+|---|---|---|---|
+| 1 | 2-3 questions a published systematic review answers; the conclusion each must reach and the PMIDs it must cite, committed before the pipeline is built | Four golden questions (§11.3) with expected properties; anchor PMIDs planned but not picked (Open now) | Everything. Must be committed **before P5 (Synthesizer) exists**, so nothing can be tuned toward it |
+| 2 | The contradiction case: the planted papers and the disagreement the output must report | `--inject-conflict <pmid>` demo hook in the plan (§5.6); golden Q2 (vitamin D, COVID-19) is the intended conflict question | The planted PMIDs and the expected disagreement, written down and committed |
+| 3 | What agent output we reject, e.g. a conclusion whose cited abstract lacks the supporting finding | Code-only checks: quotes must match the abstract verbatim (quote span validator, §5.5), seven deterministic checks (§5.9), §11.4 injection cases | One explicit, short reject list in one place, including checks that do not use our own LLM verifier |
+| 4 | Name the LLM; record its responses and PubMed results so the demo and checks rerun offline | Models in `config.yaml` (`gemini-3.8-flash` for Lead and Query Builder; extractor, synthesizer and critic still `TODO-verify-*`); SQLite LLM cache and PubMed cache; recorded Lead / Query Builder replies in `tests/fixtures/llm/` | The caches live in gitignored `data/`, so a fresh clone cannot replay the demo. Need a committed, recorded golden run that `pytest` and the demo can replay with no network |
+| 5 | How the two of us split the work | Not written anywhere | A short owner list |
+| 6 | A contact email | `ncbi.email_env` only (an env var for NCBI) | A team contact in `README.md` |
+
+Proposed answers (people pick the content; per the CLAUDE.md fixture rule, the agent that writes the code must
+not write these expected answers):
+- [ ] **Systematic-review questions (Tony + teammate, before P5).** Pick 2-3 questions with a recent published
+      systematic review or meta-analysis (Cochrane or similar). For each, commit to
+      `tests/golden/review_anchored.yaml`: the question, the review's PMID, the conclusion the report must reach
+      (one or two sentences, with direction and certainty), the PMIDs it must cite (the review's key included
+      studies that have abstracts), and the date it was written. The golden questions in §11.3 can be reused if a
+      review covers them. Checked by a person, and by a script for "required PMIDs cited".
+- [ ] **Contradiction case.** In the same file: the PMIDs to plant with `--inject-conflict`, which side each is on,
+      and the disagreement the report must state (a CONTESTED claim citing both sides, with the expected balance label).
+- [ ] **Reject list** (add to the plan §6 and the report's "Rejected claims"):
+      - a cited PMID that was not retrieved in this run (code);
+      - a quote that is not in the cited abstract verbatim, after normalization (code, already built);
+      - a claim whose cited quote does not state the finding, judged by a **person** on a sample of 20 claim-quote
+        pairs per golden question (already §11's manual audit), not only by our Critic;
+      - a conclusion that contradicts the committed review conclusion, or that omits a required PMID (script + person);
+      - a CONTESTED claim that cites only one side, and any causal wording from observational-only evidence (code).
+- [ ] **Recorded replay.** After the first full live golden run, export its LLM replies and PubMed responses to
+      `tests/fixtures/golden_runs/<question>/` and add a replay mode, so `pytest` and the demo rerun with zero live
+      calls. Name every model ID used in the README.
+- [ ] **Work split** (Tony + teammate): one owner per track, e.g. retrieval + rerank + Track B vs extraction +
+      synthesis + verification, and who writes the committed expected answers for the other person's code.
+- [ ] **Contact email in `README.md`:** Tony to add the team address (an agent should not add a personal email).
+
 ## Open now (people, not code)
 
 - [ ] **Rotate the Gemini and NCBI keys.** They were pasted into a chat session on Nov 5. Put the new ones in `.env`.
