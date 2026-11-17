@@ -1,10 +1,9 @@
 # BioLitSynth: rules for coding agents
 
 `docs/IMPLEMENTATION_PLAN.md` is the spec. Read the section for the phase you are in (§12) before writing code.
-Current status: **P0 and P1 accepted. P2 code complete (2026-11-05), waiting for acceptance**: Lead plan call, LLM
-Query Builder, Gemini + OpenAI-compatible clients, BioASQ retrieval eval, and the W1 quote validator + schema-only
-checks. Live runs stop after dedup. Acceptance needs the BioASQ dev run (a person). Do not start P3 until Tony says
-"accepted". Read `docs/OPEN_QUESTIONS.md` ("P2 status") first.
+Current status: **P0, P1 and P2 accepted (P2 on 2026-11-16). P3 in progress** (rerank + extraction, Gate 1 Fri Nov 20).
+The MedCPT reranker module and Track B comparison code exist but are not wired into the graph. Live runs stop after
+dedup. Read `docs/HANDOFF.md` first.
 
 ## Scope guard
 - Do not add agents, data sources, frameworks, vector stores, or UI pages the plan doesn't list.

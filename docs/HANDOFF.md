@@ -18,8 +18,9 @@ There are two task tracks below:
 |---|---|
 | P0 Skeleton | Accepted |
 | P1 Retrieval | Accepted |
-| P2 Plan + Query | **Code complete, waiting for acceptance.** BioASQ dev run done: D2 provisional, QB-v2 not adopted |
-| P3 to P8 | Not started, except the MedCPT reranker module, built early for Track B (Tony, 2026-11-06). P2 is still not accepted |
+| P2 Plan + Query | **Accepted 2026-11-16.** BioASQ dev run done: D2 provisional, QB-v2 not adopted |
+| P3 Rerank + Extraction | **In progress.** Reranker module done (Track B); extractor and real rerank node next. Gate 1 Fri Nov 20 |
+| P4 to P8 | Not started |
 
 What runs for real today (`biolitsynth run "<question>"`, no `--dry`):
 question → **Lead** plan (2-4 sub-questions, facets, bridges) → **Query Builder** (LLM writes a PubMed query, code
