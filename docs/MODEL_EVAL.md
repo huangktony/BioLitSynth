@@ -121,3 +121,30 @@ papers low, and recall@100 did not move. So v2's value cannot be judged with a 1
   after P3, not on today's 22-36% not-matched figures.
 - The code-side check (`concept_warnings`, trace event `query.group_not_a_key_concept`) is kept: it flags framing
   groups in live runs, where the Lead supplies key concepts, at no cost.
+
+## EX-v2: Extractor prompt v1 vs v2 (pre-registered 2026-11-17, before v2 was written)
+
+**Why:** on live golden Q1 (run `run_20261117_195157_4a5c9e`, `gemini-3.5-flash-lite`, batches of 5) prompt v1
+returned 61 findings from 61 abstracts: 53 abstracts with one finding, 4 with two, 4 with none. The plan (§5.5)
+expects 1 to 5 per paper. v1's only example shows one finding. Some statements also said more than their quote.
+
+**What v2 changes (and nothing else):** an example with several findings from one abstract; a rule that each
+distinct reported result is its own finding; a rule that the quote must itself name the outcome the statement is about.
+
+**Data:** golden Q1 only, the same 61 kept abstracts (PubMed results and rerank scores come from the cache, so the
+inputs are identical). v1 baseline: 1.00 findings per abstract, 61/61 quotes verbatim on the first try,
+10 `effect_size_unverified` and 4 `sample_size_unverified` warnings.
+
+**Rule (adopt v2 only if all hold):**
+| | Metric | Needed |
+|---|---|---|
+| (a) | Quotes verbatim on the first try | ≥ 95% |
+| (b) | Findings per abstract read | ≥ 1.5 |
+| (c) | A person reads 20 random statement / quote pairs | at most 2 where the statement says more than the quote |
+
+(a) and (b) are computed by code. Until (c) is done the adoption is provisional. If (a) or (b) fails, v2 is not
+adopted, `config.yaml` pins `prompt_versions.extractor: 1`, and no further edits are tried by eye.
+
+**Limits, stated up front:** one dev question, and the same question that showed the problem, so this is prompt
+tuning on dev data. Golden Q2 (not looked at yet) is the check that the effect is not specific to Q1. D7 (batch
+size) and D13 (extractor model) stay untested.
