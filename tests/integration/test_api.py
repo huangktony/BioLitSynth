@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from biolitsynth.api import create_app
 from biolitsynth.graph import run_dry
 from biolitsynth.pubmed import TokenBucket, parse_pubmed_xml
+from biolitsynth.rerank import FakeReranker
 from biolitsynth.store import Database
 
 from ..llm_mock import ScriptedClient
@@ -134,7 +135,7 @@ RUN_Q = "Does metformin reduce cancer incidence in type 2 diabetes, and through 
 
 def run_client(settings, clients):
     ncbi = FakeNcbi()   # default: every query reports len(CRC_IDS) hits, inside the 20-2000 band
-    overrides = {"clients": clients, **FAST} if clients is not None else {}
+    overrides = {"clients": clients, "reranker": FakeReranker({}), **FAST} if clients is not None else {}
     return TestClient(create_app(settings, transport=ncbi.transport, live_overrides=overrides))
 
 
@@ -144,12 +145,13 @@ def test_post_run_plans_builds_queries_and_lists_the_papers(settings):
     lead = ScriptedClient([("<question>", recorded)])
     qb = ScriptedClient([(f"(sq{i}): ", {"query_string": f"metformin AND topic{i}", "rationale": "in band"})
                          for i in range(1, len(texts) + 1)])
-    with run_client(settings, {"lead": lead, "query": qb}) as c:
+    extract = ScriptedClient([("", {"findings": []})] * 4)     # P3: 20 kept papers = 4 batches, "no findings"
+    with run_client(settings, {"lead": lead, "query": qb, "extractor": extract}) as c:
         r = c.post("/api/runs", json={"question": RUN_Q})
         assert r.status_code == 200, r.text
         body = r.json()
         db = Database(settings.paths.data_dir / "biolitsynth.db")
-        assert db.get_run(body["run_id"])["status"] == "stopped_after_dedup"
+        assert db.get_run(body["run_id"])["status"] == "stopped_after_quote_check"
         detail = c.get(f"/api/runs/{body['run_id']}").json()
         assert [s["text"] for s in detail["plan"]["sub_questions"]] == texts
         assert [s["id"] for s in detail["plan"]["sub_questions"]] == [f"sq{i}" for i in range(1, len(texts) + 1)]

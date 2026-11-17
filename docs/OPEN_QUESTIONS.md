@@ -195,3 +195,57 @@ Still open:
   and §11.5 asks for D1-D2 on BioASQ dev, which needs the BioASQ subset and the retrieval-only eval.
 - The scripted LLM replies in the tests were written by the coding agent. They are inputs (what a model might
   say), not expected answers, but replace them with recorded live replies once a live run exists.
+
+## P3 status (rerank node + extractor)
+Started 2026-11-17 with Tony's go ("go on the P3 plan"). The HANDOFF build plan was reviewed for gaps before
+building; the items below are what the review changed or decided.
+
+Decided in code (the build plan was silent, loose, or wrong):
+41. **Quote retry lives in the `extract` node, not `quote_check`** (replaces item 7's "inside `quote_check`").
+    `quote_check` is an independent audit that re-verifies every stored span and fails the run on a mismatch.
+    Confirmed by Tony 2026-11-17.
+42. **The Gate 1 quote number is the first-try rate.** Because only verified items are stored, an audit over the
+    store is always 100%. A new `quote_log` table records every quote the extractor proposed (attempt, status),
+    and the reported rate is quotes found in the abstract on the first extraction, before any retry. Recovered
+    and dropped counts are reported next to it.
+43. **The retry asks only for the failed findings again**, and shows the rejected quotes. The plan said
+    "re-extract that one paper", which either duplicates the findings that already verified or throws them away,
+    and for a one-paper batch the identical prompt would hit the LLM cache and return the same bad quote.
+44. **Quote length bounds: 20 to 600 characters.** Without them a quote of "was" or of the whole abstract passes
+    the validator and inflates the match rate. Both numbers are guesses (20 matches `FUZZY_MIN_CHARS`).
+45. **Code checks the extractor's numbers and names against the abstract.** `sample_size` is kept only if that
+    number is in the abstract, `effect_size` and `cohort_or_trial_name` only if they are verbatim substrings;
+    otherwise they are set to null and logged (`extract.*_unverified`). Strength depends on `sample_size`, so an
+    invented n would otherwise change a grade (invariant 1).
+46. **PubMed publication types beat the model on study design** for four unambiguous types (Meta-Analysis,
+    Systematic Review, Randomized Controlled Trial, Case Reports); disagreements are logged
+    (`extract.design_from_pubtype`). This reverses §5.4 / item 18 ("a seed the extractor may override"): the
+    design decides the strength grade, so an indexer's label is safer than the model's. Papers not yet indexed
+    fall back to the model's answer. Confirmed by Tony 2026-11-17.
+47. **Strength cut-offs** are the HANDOFF table (RCT n >= 50 or unknown = high, RCT n < 50 = moderate, cohort /
+    case-control n >= 1,000 = moderate, everything else low, non-human always low). Confirmed by Tony 2026-11-17.
+48. **`sub_question_ids` on an evidence item = every sub-question the paper was kept for.** The model is not asked
+    which sub-question a finding answers, so a paper kept for two sub-questions tags all its findings with both.
+    This can overcount coverage per sub-question; revisit with the coverage call (P4).
+49. **Rerank fallback rows** use `model = "fallback:pubmed_order"` and `score = 0.0`. Any scoring exception
+    triggers it. The CLI prints the rerank model so a silent fallback cannot pass as a MedCPT result.
+50. **`kept_pmids` order is fixed** (plan order of sub-questions, then rank), because batch composition is part of
+    the LLM cache key: a stable order is what makes a rerun cost 0 LLM calls.
+51. **`models.extractor = gemini-3.5-flash-lite`**, the newest stable Flash-Lite in `models.list` on 2026-11-17.
+    There is no 3.8 Flash-Lite text model, so the extractor is three versions behind the Lead's `gemini-3.8-flash`.
+    D13 compares the two; until then the plan's choice (Flash-Lite, for its quota) stands.
+52. **A failed extractor call fails the run.** No partial-batch handling: a rerun resumes from the LLM cache.
+53. **Gap rounds (P4):** the rerank node rescores every sub-question, so a paper kept in round 0 can be marked
+    `kept = 0` after round 1 while its evidence stays, and a paper already extracted for one sub-question is not
+    re-extracted when a later round keeps it for another. §1.3 also says top-X "per query" where §5.4c says
+    "per sub-question" (the same thing until a sub-question has two queries). Decide with the coverage node.
+
+Not solved by this step (needs a person):
+- **A verbatim quote is not a supporting quote.** The rate in item 42 shows the text exists in the abstract, not
+  that it states the finding. Only a person reading statement / quote pairs can check that (§11 manual audit).
+- **Gate 1 scope (decided by Tony 2026-11-17).** Gate 1 is held to: live golden Q1 and Q2 through the quote audit
+  with a first-try quote rate of 95% or better; the rerank time for 3 x 100 candidates on the demo laptop;
+  recall@25 after rerank on BioASQ dev; the thin-slice report. D5, D7 and D8 are recorded as `untested` with their
+  defaults, because their person-made labels do not exist. Tony supplies the golden anchor PMIDs this week (D4).
+- **P3 acceptance as written in §12 needs data that does not exist yet:** golden anchor PMIDs (D4, "anchor recall after rerank"),
+  ~50 labeled pairs (D5), 10 papers with person-listed findings (D7), judged snaps (D8).

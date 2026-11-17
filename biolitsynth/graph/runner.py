@@ -12,7 +12,9 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from ..config import Settings
 from ..llm import CallBudget, GeminiClient, LLMClient, OpenAICompatClient, StageLLM
+from ..checks.quote_audit import QuoteStats, quote_stats
 from ..pubmed import PubMedClient, TokenBucket
+from ..rerank import CrossEncoderReranker, Reranker
 from ..schemas import Facet, ResearchPlan, SubQuestion
 from ..store import Database
 from ..trace import Tracer
@@ -41,7 +43,7 @@ def initial_state(run_id: str, question: str, *, dry: bool, force_loops: bool = 
         run_id=run_id, question=question, dry=dry, approve_queries=approve_queries,
         dry_force_gap=force_loops, dry_force_retry=force_loops, dry_force_refine=force_loops,
         coverage_rounds=0, synth_attempt=-1,
-        query_ids=[], fetched_query_ids=[], pmids=[], kept_pmids=[], extracted_pmids=[], evidence_ids=[],
+        query_ids=[], fetched_query_ids=[], pmids=[], kept_pmids=[], extracted_pmids=[], evidence_ids=[], dropped_pmids=[],
     )
 
 
@@ -81,7 +83,7 @@ async def run_dry(question: str, settings: Settings, *, force_loops: bool = True
 # live runs (P2): real Query Builder + fetch + dedup; the run stops after dedup because later stages are stubs
 # ---------------------------------------------------------------------------------------------
 _EFFORT = {2: "simple", 3: "moderate", 4: "complex"}
-LIVE_STOP_AFTER = "dedup"
+LIVE_STOP_AFTER = "quote_check"
 
 
 def manual_plan(run_id: str, question: str, specs: list[str]) -> ResearchPlan:
@@ -98,7 +100,8 @@ def manual_plan(run_id: str, question: str, specs: list[str]) -> ResearchPlan:
     return ResearchPlan(run_id=run_id, question=question, effort=_EFFORT[len(sqs)], sub_questions=sqs)
 
 
-_ROLES = (("lead", "plan", "lead"), ("query", "query", "query_builder"))   # real agents so far: (role, stage, agent)
+_ROLES = (("lead", "plan", "lead"), ("query", "query", "query_builder"),
+          ("extractor", "extract", "extractor"))   # real agents so far: (role, stage, agent)
 
 
 def resolve_clients(settings: Settings, clients: dict[str, LLMClient] | None = None, *,
@@ -153,18 +156,24 @@ class LiveSummary:
     llm_cache_hits: int
     network_calls: int
     trace_path: Path
+    rerank_model: str
+    rerank_by_sub_question: dict[str, tuple[int, int]]   # sub-question id -> (candidates, kept)
+    papers_extracted: int
+    evidence_items: int
+    quotes: QuoteStats
 
 
 async def run_live(question: str, sub_questions: list[str] | None, settings: Settings, *,
                    clients: dict[str, LLMClient] | None = None, limiters: dict[str, TokenBucket] | None = None,
                    transport=None, ncbi_env=None, ncbi_limiter: TokenBucket | None = None,
-                   run_id: str | None = None) -> LiveSummary:
-    """Question → Lead plan (or hand-given sub-questions) → LLM Query Builder (esearch-refined) → fetch → dedup,
-    then stop."""
+                   run_id: str | None = None,
+                   reranker: Reranker | None = None) -> LiveSummary:
+    """Question → Lead plan (or hand-given sub-questions) → LLM Query Builder (esearch-refined) → fetch → dedup →
+    MedCPT rerank → Evidence Extractor → quote audit, then stop."""
     run_id = run_id or new_run_id()
     data_dir, run_dir = settings.paths.data_dir, settings.paths.runs_dir / run_id
     plan = manual_plan(run_id, question, sub_questions) if sub_questions else None   # validate before writing
-    roles = ("query",) if plan else ("lead", "query")
+    roles = ("query", "extractor") if plan else ("lead", "query", "extractor")
     clients = resolve_clients(settings, clients, roles=roles)
     run_dir.mkdir(parents=True, exist_ok=True)
     db = Database(data_dir / "biolitsynth.db")
@@ -177,7 +186,7 @@ async def run_live(question: str, sub_questions: list[str] | None, settings: Set
                               concurrency=settings.concurrency.ncbi, transport=transport, env=ncbi_env,
                               limiter=ncbi_limiter)
         deps = Deps(settings=settings, db=db, tracer=tracer, run_dir=run_dir, pubmed=pubmed, llms=llms,
-                    manual_plan=plan)
+                    manual_plan=plan, reranker=reranker or CrossEncoderReranker(settings.rerank))
         async with AsyncSqliteSaver.from_conn_string(str(data_dir / "checkpoints.db")) as saver:
             graph = build_graph(deps, saver, interrupt_after=[LIVE_STOP_AFTER])
             try:
@@ -197,12 +206,21 @@ async def run_live(question: str, sub_questions: list[str] | None, settings: Set
             "WHERE run_id = ? ORDER BY CAST(substr(id, 2) AS INTEGER)", (run_id,))]
         llm_events = [r for r in db.trace_events(run_id) if r["event_type"] == "llm_call"]
         dropped = len(state.get("dropped_pmids", []))
+        by_sq = {r["sub_question_id"]: (r["n"], r["kept"] or 0) for r in db.query(
+            "SELECT sub_question_id, COUNT(*) AS n, SUM(kept) AS kept FROM relevance_scores WHERE run_id = ? "
+            "GROUP BY sub_question_id ORDER BY sub_question_id", (run_id,))}
+        evidence = db.query("SELECT COUNT(*) FROM evidence WHERE run_id = ?", (run_id,))[0][0]
         return LiveSummary(
             run_id=run_id, run_dir=run_dir, state=dict(state), plan=db.get_plan(run_id), queries=queries,
             papers_kept=len(set(state.get("pmids", [])) - set(state.get("dropped_pmids", []))),
             papers_dropped=dropped, llm_calls=sum(1 for r in llm_events if not r["cache_hit"]),
             llm_cache_hits=sum(1 for r in llm_events if r["cache_hit"]), network_calls=pubmed.network_calls,
-            trace_path=trace_path)
+            trace_path=trace_path,
+            rerank_model=", ".join(r[0] for r in db.query(
+                "SELECT DISTINCT model FROM relevance_scores WHERE run_id = ? ORDER BY model", (run_id,))),
+            rerank_by_sub_question=by_sq, papers_extracted=len(state.get("extracted_pmids", [])),
+            evidence_items=evidence,
+            quotes=quote_stats(db.query("SELECT * FROM quote_log WHERE run_id = ?", (run_id,)), evidence))
     finally:
         if pubmed:
             await pubmed.aclose()

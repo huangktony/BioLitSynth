@@ -1,5 +1,6 @@
-"""CLI. `run --dry` walks the whole graph on stubs. A live `run` covers what is real so far (P2): Lead plan (or
-hand-given sub-questions) → LLM Query Builder refined on esearch counts → fetch → dedup, then it stops."""
+"""CLI. `run --dry` walks the whole graph on stubs. A live `run` covers what is real so far (P3): Lead plan (or
+hand-given sub-questions) → LLM Query Builder refined on esearch counts → fetch → dedup → rerank → extract → quote
+audit, then it stops."""
 from __future__ import annotations
 
 import argparse
@@ -116,10 +117,18 @@ def main(argv: list[str] | None = None) -> int:
             for i, (qs, hits) in enumerate(hist, 1):
                 print(f"    {i}. {hits:>8} hits  {qs}")
         print(f"papers        {lv.papers_kept} kept after dedup, {lv.papers_dropped} dropped")
+        for sq_id, (n, kept) in lv.rerank_by_sub_question.items():
+            print(f"rerank {sq_id}  {n:>3} candidates → {kept} kept")
+        print(f"rerank model  {lv.rerank_model or '-'}")
+        print(f"evidence      {lv.evidence_items} items from {lv.papers_extracted} papers")
+        q = lv.quotes
+        rate = f"{q.first_try_rate:.1%}" if q.first_try_rate is not None else "n/a"
+        print(f"quotes        {q.first_try_ok}/{q.proposed} verbatim on first try ({rate}): {q.exact} exact, "
+              f"{q.normalized} normalized, {q.fuzzy} fuzzy; {q.recovered} recovered by retry, {q.dropped} dropped")
         print(f"LLM calls     {lv.llm_calls} ({lv.llm_cache_hits} more from cache)")
         print(f"NCBI calls    {lv.network_calls}")
         print(f"trace         {lv.trace_path}")
-        print(f"stopped after {LIVE_STOP_AFTER} (rerank, extraction and later stages are not built yet)")
+        print(f"stopped after {LIVE_STOP_AFTER} (coverage and later stages are not built yet)")
         return 0
 
     s = asyncio.run(run_dry(args.question, load_settings(args.config)))

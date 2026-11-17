@@ -245,3 +245,15 @@ CREATE TABLE IF NOT EXISTS rerank_cache (
     created_at   TEXT NOT NULL,
     PRIMARY KEY (model, query_sha256, pmid)
 );
+
+-- one row per quote the extractor proposed, kept or not (plan §5.5); Gate 1 reads the first-try rate from here
+CREATE TABLE IF NOT EXISTS quote_log (
+    run_id      TEXT NOT NULL,
+    pmid        TEXT NOT NULL,
+    attempt     INTEGER NOT NULL,           -- 1 = first extraction, 2 = the single retry
+    seq         INTEGER NOT NULL,           -- 1-based position among that paper's findings in that attempt
+    status      TEXT NOT NULL,              -- exact | normalized | fuzzy | not_found | too_short | too_long
+    score       REAL,                       -- fuzzy score when status = fuzzy
+    evidence_id TEXT,                       -- set when this quote was stored as an evidence item
+    PRIMARY KEY (run_id, pmid, attempt, seq)
+);

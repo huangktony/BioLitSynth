@@ -17,6 +17,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from biolitsynth.graph import Deps, build_graph, initial_state
 from biolitsynth.graph.runner import make_stage_llms, manual_plan, new_run_id
 from biolitsynth.pubmed import PubMedClient, TokenBucket
+from biolitsynth.rerank import FakeReranker
 from biolitsynth.store import Database
 from biolitsynth.trace import Tracer
 
@@ -40,6 +41,11 @@ def scripted():
 KEPT = [i for i in CRC_IDS if i not in NO_ABSTRACT]
 
 
+def extractor_client():
+    """P3: the graph now extracts. 20 kept papers = 4 batches of 5, each answered with "no findings"."""
+    return ScriptedClient([("", {"findings": []})] * 4)
+
+
 async def run_graph(settings, ncbi, *, with_client=True):
     run_id = new_run_id()
     run_dir = settings.paths.runs_dir / run_id
@@ -48,10 +54,11 @@ async def run_graph(settings, ncbi, *, with_client=True):
     db.create_run(run_id, "q?", settings)
     client = PubMedClient(settings.ncbi, db, settings.paths.data_dir / "cache" / "pubmed", tracer=tracer,
                           transport=ncbi.transport, env={}, limiter=TokenBucket(10_000)) if with_client else None
-    llms = make_stage_llms(settings, db, tracer, roles=("query",), clients={"query": scripted()},
+    llms = make_stage_llms(settings, db, tracer, roles=("query", "extractor"),
+                           clients={"query": scripted(), "extractor": extractor_client()},
                            limiters={"gemini": TokenBucket(10_000)})
     deps = Deps(settings=settings, db=db, tracer=tracer, run_dir=run_dir, pubmed=client, llms=llms,
-                manual_plan=manual_plan(run_id, "q?", SUBQ))
+                manual_plan=manual_plan(run_id, "q?", SUBQ), reranker=FakeReranker({}))
     graph = build_graph(deps, InMemorySaver())
     cfg = {"recursion_limit": settings.graph.recursion_limit, "configurable": {"thread_id": run_id}}
     state = await graph.ainvoke(initial_state(run_id, "q?", dry=False), cfg)

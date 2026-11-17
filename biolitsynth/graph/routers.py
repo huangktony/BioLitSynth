@@ -65,6 +65,7 @@ def fan_out_extract(state: RunState, *, batch_size: int) -> list[Send] | str:
             "batch_id": f"r{rnd}b{i // batch_size + 1}",
             "pmids": pending[i:i + batch_size],
             "parent_span_id": state.get("dispatch_span_id"),
+            "dry": state.get("dry", False),
         })
         for i in range(0, len(pending), batch_size)
     ]

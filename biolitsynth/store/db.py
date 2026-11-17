@@ -15,7 +15,7 @@ from typing import Any, Iterable, Sequence
 
 from pydantic import BaseModel
 
-from ..schemas import Paper, ResearchPlan, TraceEvent
+from ..schemas import EvidenceItem, Paper, RelevanceScore, ResearchPlan, TraceEvent
 
 
 def utcnow_iso() -> str:
@@ -149,6 +149,51 @@ class Database:
         now = utcnow_iso()
         self.executemany("INSERT OR REPLACE INTO rerank_cache (model, query_sha256, pmid, score, created_at) "
                          "VALUES (?,?,?,?,?)", [(model, query_sha256, p, float(s), now) for p, s in scores])
+
+    # --- relevance, evidence, quote log (P3) -----------------------------------------------------
+    def save_relevance(self, run_id: str, query_sha256: str, scores: Iterable[RelevanceScore]) -> None:
+        self.executemany(
+            "INSERT OR REPLACE INTO relevance_scores (run_id, sub_question_id, pmid, query_text_sha256, model, score, "
+            "rank, pubmed_rank, kept, drop_reason) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(run_id, r.sub_question_id, r.pmid, query_sha256, r.model, r.score, r.rank, r.pubmed_rank, int(r.kept),
+              r.drop_reason) for r in scores])
+
+    def save_evidence(self, run_id: str, item: EvidenceItem) -> None:
+        self.insert("evidence", {
+            "run_id": run_id, "id": item.id, "pmid": item.pmid, "study_id": item.study_id,
+            "statement": item.statement, "quote": item.quote, "quote_start": item.quote_start,
+            "quote_end": item.quote_end, "subject": item.subject, "outcome": item.outcome,
+            "canonical_subject": item.canonical_subject, "canonical_outcome": item.canonical_outcome,
+            "direction": item.direction.value, "effect_size": item.effect_size, "population": item.population,
+            "organism": item.organism.value, "study_design": item.study_design.value,
+            "sample_size": item.sample_size, "cohort_or_trial_name": item.cohort_or_trial_name,
+            "strength": item.strength, "limitations_json": json.dumps(item.limitations),
+            "extractor_model": item.extractor_model, "prompt_version": item.prompt_version}, replace=True)
+        self.executemany("INSERT OR REPLACE INTO evidence_subq (run_id, evidence_id, sub_question_id) VALUES (?,?,?)",
+                         [(run_id, item.id, sq) for sq in item.sub_question_ids])
+
+    def get_evidence(self, run_id: str) -> list[EvidenceItem]:
+        subs: dict[str, list[str]] = {}
+        for r in self.query("SELECT evidence_id, sub_question_id FROM evidence_subq WHERE run_id = ? "
+                            "ORDER BY sub_question_id", (run_id,)):
+            subs.setdefault(r["evidence_id"], []).append(r["sub_question_id"])
+        return [EvidenceItem(
+            id=r["id"], pmid=r["pmid"], sub_question_ids=subs.get(r["id"], []), statement=r["statement"],
+            quote=r["quote"], quote_start=r["quote_start"], quote_end=r["quote_end"], subject=r["subject"],
+            outcome=r["outcome"], canonical_subject=r["canonical_subject"], canonical_outcome=r["canonical_outcome"],
+            cohort_or_trial_name=r["cohort_or_trial_name"], study_id=r["study_id"], direction=r["direction"],
+            effect_size=r["effect_size"], population=r["population"], organism=r["organism"],
+            study_design=r["study_design"], sample_size=r["sample_size"], strength=r["strength"],
+            limitations=json.loads(r["limitations_json"] or "[]"), extractor_model=r["extractor_model"] or "",
+            prompt_version=r["prompt_version"] or "",
+        ) for r in self.query("SELECT * FROM evidence WHERE run_id = ? ORDER BY pmid, "
+                              "CAST(substr(id, length('ev_' || pmid || '_') + 1) AS INTEGER)", (run_id,))]
+
+    def save_quote_log(self, run_id: str, outcomes: Iterable[Any]) -> None:
+        self.executemany(
+            "INSERT OR REPLACE INTO quote_log (run_id, pmid, attempt, seq, status, score, evidence_id) "
+            "VALUES (?,?,?,?,?,?,?)",
+            [(run_id, o.pmid, o.attempt, o.seq, o.status, o.score, o.evidence_id) for o in outcomes])
 
     # --- trace -------------------------------------------------------------------------------
     def insert_trace_event(self, e: TraceEvent) -> None:

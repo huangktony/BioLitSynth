@@ -3,7 +3,7 @@
 models:
   lead:        {provider: gemini,        model: gemini-3.8-flash}   # verified via models.list 2026-11-05
   query:       {provider: gemini,        model: gemini-3.8-flash}   # verified via models.list 2026-11-05
-  extractor:   {provider: gemini,        model: TODO-verify-gemini-flash-lite}
+  extractor:   {provider: gemini,        model: gemini-3.5-flash-lite}   # newest stable Flash-Lite in models.list 2026-11-17
   normalizer:  {provider: gemini,        model: TODO-verify-gemini-flash}
   conflict:    {provider: gemini,        model: TODO-verify-gemini-flash}
   synthesizer: {provider: gemini,        model: TODO-verify-gemini-flash}

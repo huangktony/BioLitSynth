@@ -8,6 +8,7 @@ import pytest
 from biolitsynth.graph.runner import manual_plan, run_live
 from biolitsynth.llm import BudgetExceeded, ModelNotVerified
 from biolitsynth.pubmed import TokenBucket
+from biolitsynth.rerank import FakeReranker
 from biolitsynth.store import Database
 
 from ..llm_mock import ScriptedClient
@@ -34,8 +35,16 @@ def script():
     ])
 
 
-async def live(settings, fake_ncbi, client):
-    return await run_live(QUESTION, SUBQ, settings, clients={"query": client}, transport=fake_ncbi.transport, **FAST)
+EXTRACT_CALLS = 4        # P3: the run now goes on to extraction: 20 kept papers = 4 batches of 5, "no findings" each
+
+
+def extractor_client():
+    return ScriptedClient([("", {"findings": []})] * EXTRACT_CALLS)
+
+
+async def live(settings, fake_ncbi, client, extractor=None):
+    return await run_live(QUESTION, SUBQ, settings, clients={"query": client, "extractor": extractor or extractor_client()},
+                          reranker=FakeReranker({}), transport=fake_ncbi.transport, **FAST)
 
 
 async def test_question_to_queries_to_deduped_papers(settings):
@@ -50,14 +59,14 @@ async def test_question_to_queries_to_deduped_papers(settings):
     fetched_terms = {t for t, retmax in n.search_terms() if retmax != "0"}
     assert fetched_terms == {REFINED1, DRAFT2}
     assert lv.papers_kept == 20 and lv.papers_dropped == 0      # 25 recorded ids, 5 without abstracts
-    assert lv.llm_calls == 3 and lv.llm_cache_hits == 0 and len(client.calls) == 3
+    assert lv.llm_calls == 3 + EXTRACT_CALLS and lv.llm_cache_hits == 0 and len(client.calls) == 3
 
     db = Database(settings.paths.data_dir / "biolitsynth.db")
-    assert db.get_run(lv.run_id)["status"] == "stopped_after_dedup"
+    assert db.get_run(lv.run_id)["status"] == "stopped_after_quote_check"
     stages = {r["stage"] for r in db.trace_events(lv.run_id)}
-    assert {"plan", "query", "fetch", "dedup"} <= stages and not stages & {"rerank", "extract", "synthesize"}
+    assert {"plan", "query", "fetch", "dedup", "rerank", "extract"} <= stages and "synthesize" not in stages
     llm_spans = [r for r in db.trace_events(lv.run_id) if r["event_type"] == "llm_call"]
-    assert {r["prompt_version"] for r in llm_spans} == {"query_builder.v1"} and all(r["parent_span_id"] for r in llm_spans)
+    assert {r["prompt_version"] for r in llm_spans} == {"query_builder.v1", "extractor.v1"} and all(r["parent_span_id"] for r in llm_spans)
     assert db.get_plan(lv.run_id).sub_questions[0].key_concepts == ["metformin", "colorectal neoplasms"]
     db.close()
     snap = json.loads((lv.run_dir / "02_queries.json").read_text())
@@ -69,8 +78,8 @@ async def test_rerun_costs_zero_llm_calls_and_zero_network_calls(settings):
     await live(settings, n, script())
     before = len(n.requests)
     empty = ScriptedClient([])                                  # would fail if asked anything
-    lv = await live(settings, n, empty)
-    assert (lv.llm_calls, lv.llm_cache_hits, lv.network_calls) == (0, 3, 0) and len(n.requests) == before
+    lv = await live(settings, n, empty, extractor=ScriptedClient([]))
+    assert (lv.llm_calls, lv.llm_cache_hits, lv.network_calls) == (0, 3 + EXTRACT_CALLS, 0) and len(n.requests) == before
     assert {r["query_string"] for r in lv.queries} == {REFINED1, DRAFT2}
 
 
@@ -112,13 +121,14 @@ async def test_without_sub_questions_the_lead_plans(settings):
         "bridges": [{"from_sub_question": 2, "to_sub_question": 1, "hypothesis": "h"}], "out_of_scope_notes": []}
     client = ScriptedClient([("<question>", lead_reply), *script().script])
     n = ncbi()
-    lv = await run_live(QUESTION, None, settings, clients={"lead": client, "query": client},
-                        transport=n.transport, **FAST)
+    lv = await run_live(QUESTION, None, settings,
+                        clients={"lead": client, "query": client, "extractor": extractor_client()},
+                        reranker=FakeReranker({}), transport=n.transport, **FAST)
     assert lv.plan.effort == "simple" and [s.facet.value for s in lv.plan.sub_questions] == ["epidemiology",
                                                                                               "clinical_outcome"]
     assert lv.plan.bridges[0].from_sub_question_id == "sq2"
-    assert {r["query_string"] for r in lv.queries} == {REFINED1, DRAFT2} and lv.llm_calls == 4
+    assert {r["query_string"] for r in lv.queries} == {REFINED1, DRAFT2} and lv.llm_calls == 4 + EXTRACT_CALLS
     db = Database(settings.paths.data_dir / "biolitsynth.db")
     spans = [r for r in db.trace_events(lv.run_id) if r["event_type"] == "llm_call"]
-    assert {r["prompt_version"] for r in spans} == {"lead.v1", "query_builder.v1"}
+    assert {r["prompt_version"] for r in spans} == {"lead.v1", "query_builder.v1", "extractor.v1"}
     db.close()

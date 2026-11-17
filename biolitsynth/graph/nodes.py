@@ -7,6 +7,7 @@ keys (see state.py). `parent_span_id` arrives in the Send payload; top-level nod
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,13 +16,16 @@ from typing import Any, Awaitable, Callable
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from ..agents import extractor
 from ..agents import lead as lead_agent
 from ..agents import query_builder as qbuild
+from ..checks.quote_audit import QuoteAuditError, audit_spans, quote_stats
 from ..config import Settings
 from ..llm import StageLLM
-from ..schemas import ResearchPlan, Stage, SubQuestion
+from ..schemas import RelevanceScore, ResearchPlan, Stage, SubQuestion
 from ..store import Database, write_snapshot
 from ..pubmed import PubMedClient, dedup_papers
+from ..rerank import Reranker, article_text, query_text, score_with_cache, select_top
 from ..trace import Tracer
 from . import dry
 from .routers import route_after_count
@@ -39,6 +43,7 @@ class Deps:
     pubmed: PubMedClient | None = None     # None is fine for dry runs; real fetch needs it
     llms: dict[str, StageLLM] = field(default_factory=dict)   # role (config.yaml models.*) -> StageLLM
     manual_plan: ResearchPlan | None = None  # sub-questions given by hand; None = the Lead plans
+    reranker: Reranker | None = None       # None is fine for dry runs; real rerank needs it
 
     @property
     def run_id(self) -> str:
@@ -53,6 +58,11 @@ class Deps:
         if self.pubmed is None:
             raise RuntimeError("a non-dry run needs Deps.pubmed (a PubMedClient)")
         return self.pubmed
+
+    def require_reranker(self) -> Reranker:
+        if self.reranker is None:
+            raise RuntimeError("a non-dry run needs Deps.reranker (a Reranker)")
+        return self.reranker
 
     def sub_question(self, sq_id: str) -> SubQuestion:
         plan = self.db.get_plan(self.run_id)
@@ -268,19 +278,119 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         return {"dropped_pmids": [d.pmid for d in result.dropped]}
 
     async def rerank(state: RunState) -> dict:
-        async with tr.span("rerank", "reranker", input_refs=[f"pmid:{p}" for p in state.get("pmids", [])]) as sp:
-            sp.message = "keep all (stub; MedCPT arrives in P3)"
+        if state.get("dry"):
+            async with tr.span("rerank", "reranker", input_refs=[f"pmid:{p}" for p in state.get("pmids", [])]) as sp:
+                sp.message = "keep all (stub)"
+            dropped = set(state.get("dropped_pmids", []))
+            return {"kept_pmids": [p for p in state.get("pmids", []) if p not in dropped],
+                    "dispatch_span_id": sp.span_id}
+        reranker = deps.require_reranker()
+        plan_ = db.get_plan(deps.run_id)
         dropped = set(state.get("dropped_pmids", []))
-        return {"kept_pmids": [p for p in state.get("pmids", []) if p not in dropped], "dispatch_span_id": sp.span_id}
+        top_x = st.limits.papers_per_query
+        kept: list[str] = []
+        fallback = False
+        async with tr.span("rerank", "reranker") as top:
+            for sq in plan_.sub_questions if plan_ else []:
+                ranks: dict[str, int] = {}
+                for r in db.query("SELECT rp.pmid, MIN(rp.rank) AS rank FROM run_papers rp JOIN queries q "
+                                  "ON q.run_id = rp.run_id AND q.id = rp.query_id WHERE rp.run_id = ? "
+                                  "AND q.sub_question_id = ? GROUP BY rp.pmid", (deps.run_id, sq.id)):
+                    if r["pmid"] not in dropped:
+                        ranks[r["pmid"]] = r["rank"]
+                papers = db.get_papers(sorted(ranks))
+                ranks = {p: ranks[p] for p in ranks if p in papers}
+                query = query_text(sq)
+                sha = hashlib.sha256(query.encode("utf-8")).hexdigest()
+                async with tr.span("rerank", "reranker", input_refs=[sq.id, *(f"pmid:{p}" for p in ranks)]) as sp:
+                    scores: list[RelevanceScore] = []
+                    if ranks and not fallback:
+                        try:
+                            docs = [(p, article_text(papers[p])) for p in ranks]
+                            got = score_with_cache(reranker, db, query, docs)
+                            scores = select_top(list(got.items()), sub_question_id=sq.id, top_x=top_x,
+                                                min_score=st.rerank.min_score, model=reranker.model,
+                                                pubmed_rank=ranks)
+                        except Exception as exc:
+                            fallback = True
+                            await tr.event("rerank", "reranker", "error", parent=sp.span_id, status="fail",
+                                           message=f"rerank.fallback {type(exc).__name__}: {exc}")
+                    if ranks and fallback:
+                        order = sorted(ranks, key=lambda p: (ranks[p], p))
+                        scores = [RelevanceScore(sub_question_id=sq.id, pmid=p, score=0.0, rank=i, pubmed_rank=ranks[p],
+                                                 kept=i <= top_x, drop_reason=None if i <= top_x else "below_top_x",
+                                                 model="fallback:pubmed_order") for i, p in enumerate(order, 1)]
+                    db.save_relevance(deps.run_id, sha, scores)
+                    sq_kept = [x.pmid for x in sorted(scores, key=lambda x: x.rank) if x.kept]
+                    kept += sq_kept
+                    sp.output_refs = [f"pmid:{p}" for p in sq_kept]
+                    sp.message = f"{sq.id}: {len(ranks)} candidates → {len(sq_kept)} kept"
+            kept = merge_unique([], kept)
+            top.output_refs = [f"pmid:{p}" for p in kept]
+            top.message = f"{len(kept)} papers kept{' (fallback: PubMed order)' if fallback else ''}"
+        return {"kept_pmids": kept, "dispatch_span_id": top.span_id}
 
     async def extract(payload: dict) -> dict:
         pmids = payload["pmids"]
         async with tr.span("extract", "extractor", input_refs=[f"pmid:{p}" for p in pmids],
                            parent=payload.get("parent_span_id")) as sp:
-            ids = [f"ev_{p}_1" for p in pmids]
+            if payload.get("dry"):
+                ids = [f"ev_{p}_1" for p in pmids]
+                sp.output_refs = ids
+                sp.message = f"batch {payload['batch_id']}: {len(pmids)} abstracts (stub)"
+                return {"evidence_ids": ids, "extracted_pmids": pmids}
+            papers = db.get_papers(pmids)
+            sqs = {s_.id: s_ for s_ in db.get_plan(deps.run_id).sub_questions}
+            kept_for: dict[str, list[SubQuestion]] = {p: [] for p in pmids}
+            for r in db.query("SELECT pmid, sub_question_id FROM relevance_scores WHERE run_id = ? AND kept = 1 "
+                              "ORDER BY sub_question_id", (deps.run_id,)):
+                if r["pmid"] in kept_for:
+                    kept_for[r["pmid"]].append(sqs[r["sub_question_id"]])
+            results = await extractor.extract_batch(
+                [papers[p] for p in pmids], kept_for, deps.llm("extractor"),
+                version=st.prompt_versions.get(extractor.PROMPT), parent=sp.span_id)
+            ids: list[str] = []
+            for res in results:
+                for item in res.items:
+                    db.save_evidence(deps.run_id, item)
+                    ids.append(item.id)
+                db.save_quote_log(deps.run_id, res.outcomes)
+                ref = [f"pmid:{res.pmid}"]
+                for o in res.outcomes:
+                    if o.status == "fuzzy" and o.evidence_id:
+                        await tr.event("extract", "quote_span_validator", "validation", parent=sp.span_id,
+                                       input_refs=ref, message=f"validation.quote_snapped {o.evidence_id} "
+                                                               f"score={o.score}")
+                if res.dropped:
+                    await tr.event("extract", "quote_span_validator", "validation", parent=sp.span_id,
+                                   input_refs=ref, message=f"validation.quote_dropped pmid:{res.pmid} n={res.dropped}")
+                for w in res.warnings:
+                    await tr.event("extract", "quote_span_validator", "validation", parent=sp.span_id,
+                                   input_refs=ref, message=w)
+                if res.retried:
+                    await tr.event("extract", "quote_span_validator", "retry", parent=sp.span_id, status="retry",
+                                   input_refs=ref, message=f"validation.quote_retry pmid:{res.pmid}")
             sp.output_refs = ids
-            sp.message = f"batch {payload['batch_id']}: {len(pmids)} abstracts (stub)"
+            sp.message = (f"batch {payload['batch_id']}: {len(pmids)} abstracts → {len(ids)} items "
+                          f"({sum(r.retried for r in results)} retried, {sum(r.dropped for r in results)} dropped)")
         return {"evidence_ids": ids, "extracted_pmids": pmids}
+
+    async def quote_check(state: RunState) -> dict:
+        async with tr.span("extract", "quote_span_validator", event_type="validation") as sp:
+            if state.get("dry"):
+                sp.message = "no-op (dry)"
+                return {}
+            items = db.get_evidence(deps.run_id)
+            bad = audit_spans(items, db.get_papers(sorted({i.pmid for i in items})))
+            if bad:
+                raise QuoteAuditError(f"{len(bad)} evidence item(s) without a valid quote span: {', '.join(bad)}")
+            write_snapshot(deps.run_dir, 4, "evidence", items)
+            qs = quote_stats(db.query("SELECT * FROM quote_log WHERE run_id = ?", (deps.run_id,)), len(items))
+            rate = f"{qs.first_try_rate:.1%}" if qs.first_try_rate is not None else "n/a"
+            sp.output_refs = [i.id for i in items]
+            sp.message = (f"{qs.stored} items stored; quotes {qs.first_try_ok}/{qs.proposed} verbatim on first try "
+                          f"({rate}), {qs.recovered} recovered by retry, {qs.dropped} dropped")
+        return {}
 
     async def coverage(state: RunState) -> dict:
         rounds = state.get("coverage_rounds", 0)
@@ -351,7 +461,7 @@ def make_nodes(deps: Deps) -> dict[str, Node]:
         "dedup": dedup,
         "rerank": rerank,
         "extract": extract,
-        "quote_check": noop("extract", "quote_span_validator", "no-op (stub)", event_type="validation"),
+        "quote_check": quote_check,
         "coverage": coverage,
         "cluster_studies": noop("cluster", "study_clusterer", "no-op (stub; arrives in P4)"),
         "normalize_terms": noop("normalize_terms", "term_normalizer", "no-op (stub; arrives in P4)"),
