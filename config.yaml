@@ -48,4 +48,17 @@ providers:                    # §7. Keys come from env vars (names below), neve
 # Pinned prompt versions (§11.5): a new version goes live only after its decision passes. Unlisted = latest.
 prompt_versions: {query_builder: 1}
 
+rerank:                    # plan §5.4c: MedCPT cross-encoder, local model, no API calls
+  model: ncbi/MedCPT-Cross-Encoder
+  batch_size: 32
+  max_length: 512
+  min_score: null          # calibrated in P3 (§5.4c); null = top-X only
+  device: auto             # auto = mps, then cuda, then cpu
+
+dense:                     # Track B comparison only (docs/PROPOSAL_RETRIEVAL_COMPARISON.md); not used by runs
+  index_path: data/medcpt/pubmed.ivfpq
+  query_encoder: ncbi/MedCPT-Query-Encoder
+  nprobe: 256              # fixed from the index build check (docs/HANDOFF.md B1)
+  max_length: 64
+
 paths: {data_dir: data, runs_dir: runs}

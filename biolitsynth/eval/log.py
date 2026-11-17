@@ -86,6 +86,24 @@ def record_from_retrieval_json(path: str | Path, config_json: str) -> dict:
                    backfilled=True)
 
 
+def record_from_compare_report(report, *, config_json: str) -> dict:
+    """Compare eval (Track B). Same header fields as a retrieval record, `kind: "compare"`, per-question recall@25
+    and pool recall by option. No question text, PMIDs or query strings."""
+    status = _git("status", "--porcelain", "--untracked-files=no")
+    per_q = {q.id: {"relevant_in_index": q.relevant_in_index, "n_relevant": q.n_relevant,
+                    "options": {o: {"recall_at_25": r.recall_at_25, "precision_at_25": r.precision_at_25,
+                                    "pool_recall": r.pool_recall} for o, r in q.options.items()}}
+             for q in report.questions}
+    return {"eval_id": report.eval_id, "kind": "compare",
+            "date": datetime.now(timezone.utc).isoformat(timespec="seconds"), "split": report.split,
+            "n_questions": len(report.questions), "question_ids": [q.id for q in report.questions],
+            "model": report.model, "prompt_version": report.prompt_version,
+            "prompt_hash": _prompt_hash(report.prompt_version), "config_hash": config_hash(config_json),
+            "reranker": report.reranker, "nprobe": report.nprobe, "git_commit": _git("rev-parse", "--short", "HEAD"),
+            "git_dirty": None if status is None else bool(status), "summary": report.summary(),
+            "per_question": per_q}
+
+
 def read_log(path: str | Path = DEFAULT_LOG) -> list[dict]:
     p = Path(path)
     if not p.exists():

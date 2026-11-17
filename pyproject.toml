@@ -20,6 +20,11 @@ dependencies = [
     # Read-only dashboard (`biolitsynth serve`); the same server grows into the §16 API in P7a.
     "fastapi==0.162.0",
     "uvicorn==0.54.0",
+    # MedCPT reranker (plan §5.4c) and the dense-retrieval comparison. Imported lazily, never at `import biolitsynth`.
+    "torch==2.14.1",
+    "transformers==5.20.2",
+    "faiss-cpu==1.15.1",
+    "numpy==2.5.4",
 ]
 
 [project.optional-dependencies]

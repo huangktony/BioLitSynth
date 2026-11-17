@@ -235,3 +235,13 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     response_json  TEXT NOT NULL,
     created_at     TEXT NOT NULL
 );
+
+-- Global cross-encoder score cache (plan §5.4c). query_sha256 = sha256 of the query text; scores are logits.
+CREATE TABLE IF NOT EXISTS rerank_cache (
+    model        TEXT NOT NULL,
+    query_sha256 TEXT NOT NULL,
+    pmid         TEXT NOT NULL,
+    score        REAL NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (model, query_sha256, pmid)
+);

@@ -50,6 +50,17 @@ def main(argv: list[str] | None = None) -> int:
                      help="Query Builder prompt version to evaluate (default: config.yaml prompt_versions, else latest)")
     ret.add_argument("--config", default=None, help="path to config.yaml")
     ret.add_argument("--log", default="docs/eval_log.jsonl", help="committed eval log to append to")
+    cmp_ = evs.add_parser("compare", help="Track B: Boolean deep vs dense MedCPT vs hybrid, all reranked to 25")
+    cmp_.add_argument("--bioasq", required=True)
+    cmp_.add_argument("--subset", required=True, help="subset YAML, e.g. tests/golden/bioasq_compare_all.yaml")
+    cmp_.add_argument("--split", choices=["dev", "held_back", "all"], default="all",
+                      help="all = dev then held_back, in file order")
+    cmp_.add_argument("--limit", type=int, default=None, help="only the first N questions")
+    cmp_.add_argument("--max-llm-calls", type=int, default=300)
+    cmp_.add_argument("--prompt-version", type=int, default=None,
+                      help="Query Builder prompt version (default: config.yaml prompt_versions, else latest)")
+    cmp_.add_argument("--config", default=None, help="path to config.yaml")
+    cmp_.add_argument("--log", default="docs/eval_log.jsonl", help="committed eval log to append to")
     bf = evs.add_parser("backfill-log", help="append completed evals from the store to the eval log if absent")
     bf.add_argument("--config", default=None, help="path to config.yaml")
     bf.add_argument("--log", default="docs/eval_log.jsonl")
@@ -147,6 +158,8 @@ def _eval(args) -> int:
     from .graph.runner import resolve_clients
     from .llm import MissingApiKey, ModelNotVerified
     subset = load_subset(args.subset)
+    if args.eval_cmd == "compare":
+        return _compare(args, questions, subset)
     if args.split == "held_back":
         print("Note: the held-back split is for the final report only (plan §11.5 rule 2), never for choosing.",
               file=sys.stderr)
@@ -168,6 +181,45 @@ def _eval(args) -> int:
     append_log(record_from_report(report, settings, config_json=run_config_json(settings, report.eval_id)), args.log)
     for k, v in report.summary().items():
         print(f"{k:<26}{v}")
+    print(f"{'details':<26}{path}")
+    print(f"{'logged to':<26}{args.log}")
+    return 0
+
+
+def _compare(args, questions, subset) -> int:
+    from .eval.compare import OPTIONS, run_compare_eval
+    from .eval.log import append_log, record_from_compare_report, run_config_json
+    from .graph.runner import resolve_clients
+    from .llm import MissingApiKey, ModelNotVerified
+    ids = (subset["dev"] + subset["held_back"] if args.split == "all" else subset[args.split])[: args.limit]
+    missing = [i for i in ids if i not in questions]
+    if missing:
+        print(f"{len(missing)} subset ids are not in {args.bioasq}, e.g. {missing[:3]}", file=sys.stderr)
+        return 2
+    settings = load_settings(args.config)
+    if args.prompt_version is not None:
+        settings.prompt_versions["query_builder"] = args.prompt_version
+    try:
+        client = resolve_clients(settings, roles=("query",))["query"]
+    except (MissingApiKey, ModelNotVerified) as e:
+        print(f"cannot start: {e}", file=sys.stderr)
+        return 2
+    from .rerank import CrossEncoderReranker
+    from .retrieval import DenseIndex
+    reranker = CrossEncoderReranker(settings.rerank)
+    dense = DenseIndex.from_config(settings.dense)
+    report, path = asyncio.run(run_compare_eval(
+        [questions[i] for i in ids], settings, split=args.split, client=client, reranker=reranker, dense=dense,
+        max_llm_calls=args.max_llm_calls))
+    append_log(record_from_compare_report(report, config_json=run_config_json(settings, report.eval_id)), args.log)
+    s = report.summary()
+    print(f"{'option':<20}{'pool recall':>13}{'recall@25':>11}{'precision@25':>14}")
+    for o in OPTIONS:
+        r = s["options"][o]
+        print(f"{o:<20}{r['pool_recall']:>13}{r['recall_at_25']:>11}{r['precision_at_25']:>14}")
+    for k, v in s.items():
+        if k != "options":
+            print(f"{k:<26}{v}")
     print(f"{'details':<26}{path}")
     print(f"{'logged to':<26}{args.log}")
     return 0

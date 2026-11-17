@@ -135,6 +135,21 @@ class Database:
         self.insert("llm_cache", {"key": key, "model": model, "prompt_version": prompt_version,
                                   "response_json": response_json, "created_at": utcnow_iso()}, replace=True)
 
+    # --- rerank score cache (plan §5.4c) ---------------------------------------------------------
+    def get_rerank_scores(self, model: str, query_sha256: str, pmids: Sequence[str]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for i in range(0, len(pmids), 500):
+            chunk = list(pmids[i:i + 500])
+            rows = self.query("SELECT pmid, score FROM rerank_cache WHERE model = ? AND query_sha256 = ? "
+                              f"AND pmid IN ({','.join('?' * len(chunk))})", [model, query_sha256, *chunk])
+            out.update({r["pmid"]: r["score"] for r in rows})
+        return out
+
+    def put_rerank_scores(self, model: str, query_sha256: str, scores: Iterable[tuple[str, float]]) -> None:
+        now = utcnow_iso()
+        self.executemany("INSERT OR REPLACE INTO rerank_cache (model, query_sha256, pmid, score, created_at) "
+                         "VALUES (?,?,?,?,?)", [(model, query_sha256, p, float(s), now) for p, s in scores])
+
     # --- trace -------------------------------------------------------------------------------
     def insert_trace_event(self, e: TraceEvent) -> None:
         self.insert("trace_events", {

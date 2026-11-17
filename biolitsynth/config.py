@@ -98,6 +98,23 @@ class Paths(_Strict):
     runs_dir: Path = Path("runs")
 
 
+class RerankConfig(_Strict):
+    """MedCPT cross-encoder (plan §5.4c). Local model, no API calls."""
+    model: str
+    batch_size: int = Field(32, ge=1)
+    max_length: int = Field(512, ge=1)
+    min_score: float | None = None        # calibrated in P3 (D5); None = top-X only
+    device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
+
+
+class DenseConfig(_Strict):
+    """Full-corpus MedCPT index for the Track B comparison only; runs do not use it."""
+    index_path: Path
+    query_encoder: str
+    nprobe: int = Field(256, ge=1)
+    max_length: int = Field(64, ge=1)
+
+
 class Settings(_Strict):
     models: Models
     limits: Limits = Limits()
@@ -111,6 +128,8 @@ class Settings(_Strict):
     # Pin a prompt to a version, e.g. {query_builder: 1}; prompts not listed use their highest version.
     prompt_versions: dict[str, int] = {}
     paths: Paths = Paths()
+    rerank: RerankConfig
+    dense: DenseConfig
 
 
 def load_settings(path: str | os.PathLike | None = None) -> Settings:
