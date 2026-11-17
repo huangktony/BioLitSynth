@@ -1,17 +1,39 @@
-# Handoff and TODO (updated Mon Nov 16, 2026)
+# Handoff and TODO (updated Tue Nov 17, 2026)
 
-## Start here (next session, Nov 16)
+## Start here (next session, after Nov 17)
 
-1. **P2 is accepted (Tony, 2026-11-16). P3 is in progress. Gate 1 is Fri Nov 20.**
-2. **Next action:** the P3 build plan below ("P3 build plan: rerank node + extractor") is drafted and **waiting for
-   Tony's go**, including two choices he has not confirmed yet (quote retry inside the extract node; strength
-   cut-offs). Ask once, then implement: Tony wants the main session to plan and review, and code written by Sonnet
-   subagents (one writes code, a separate one writes tests from the same spec).
-3. **People items before P5** (see "Reviewer feedback"): review-anchored questions with committed conclusions and
+1. **P3 is in progress. Gate 1 is Fri Nov 20.** Gate 1 scope was decided by Tony on 2026-11-17 (see
+   `docs/OPEN_QUESTIONS.md`, "P3 status"): live golden Q1 and Q2 through the quote audit at 95% or better on the
+   first try, the rerank time, recall@25 after rerank on BioASQ dev, and the thin-slice report. D5, D7 and D8 are
+   recorded as `untested`.
+2. **Built on Nov 17 (commit `00320e3`):** the real rerank node, the Evidence Extractor
+   (`agents/extractor.py`, `prompts/extractor.v1.md`, `models.extractor = gemini-3.5-flash-lite`), the quote audit
+   (`checks/quote_audit.py`, `quote_log` table). Live runs now stop after `quote_check`. 495 offline tests pass.
+   Decisions 41-53 are in OPEN_QUESTIONS; Tony confirmed 41, 46 and 47.
+3. **Live golden Q1 (run `run_20261117_195157_4a5c9e`):** rerank 75 / 99 / 11 candidates → 25 / 25 / 11 kept in
+   14.5 s (MedCPT on this laptop, model load included); 61 items from 61 abstracts; 61/61 quotes verbatim on the
+   first try (58 exact, 3 normalized); 19 LLM calls, 3.5 minutes; a rerun makes 0 LLM and 0 NCBI calls.
+4. **Problems the live run showed (not fixed, Tony to decide):**
+   - The extractor returns about one finding per abstract (53 papers with 1, 4 with 2, 4 with none); the plan
+     expects 1 to 5. Likely causes: the prompt's single example shows one finding, batches of 5, Flash-Lite.
+     A fix is a new prompt version (`extractor.v2`) or the D7 / D13 comparisons.
+   - 22 of sq1's 25 kept papers are meta-analyses and all grade "high". The strength table cannot tell a
+     meta-analysis of observational studies from one of trials, which is exactly golden Q1's contradiction.
+   - `direction` is not comparable across items ("increases" survival vs "decreases" mortality). Conflict
+     grouping (P4) needs the outcome polarity fixed first.
+   - sq2 (mechanism) kept 25 papers that are almost all narrative reviews; primary lab studies are rare.
+   - The sq3 query ended at 12 hits, under the 20-hit band, so only 11 candidates.
+   - Some statements say more than their quote (e.g. `ev_22847511_1`). A person must read a sample.
+5. **Next, before Gate 1:** live golden Q2; extend the retrieval eval with recall@25 after rerank (BioASQ dev);
+   the thin-slice Synthesizer and `report.md`. Tony supplies the golden anchor PMIDs. The test quotes listed in
+   the Nov 17 session need a person's approval (fixture rule).
+6. **People items before P5** (see "Reviewer feedback"): review-anchored questions with committed conclusions and
    required PMIDs (candidate reviews are listed), the contradiction case, the work split, a contact email.
-4. **Track B:** code done, benchmark (B3) not run. Can run in the background; it must not delay Gate 1.
-5. Local notes: `rg` is not on PATH in this shell after the OS update (use `grep`). Agents cannot write
+7. **Track B:** code done, benchmark (B3) not run. Can run in the background; it must not delay Gate 1.
+8. Local notes: `rg` is not on PATH in this shell after the OS update (use `grep`). Agents cannot write
    `.claude/settings.local.json` (blocked by the auto-mode classifier); Tony adds permission rules himself.
+   Work pattern: the main session plans and reviews; one Sonnet subagent writes code, a separate one writes tests
+   from the same spec.
 
 
 Read this file first, then `docs/OPEN_QUESTIONS.md`, then `docs/IMPLEMENTATION_PLAN.md` v1.5 (§11.3b, §11.5,
@@ -187,7 +209,7 @@ Each phase ends with: tests green, the acceptance demo run live for Tony, a comm
 
 ### P3 Rerank + Extraction (Gate 1, Fri Nov 20)
 
-#### P3 build plan: rerank node + extractor (drafted 2026-11-16, waiting for Tony's go)
+#### P3 build plan: rerank node + extractor (built 2026-11-17, commit `00320e3`; OPEN_QUESTIONS 41-53 list what changed)
 How we'll know it works: offline tests pass with `FakeReranker` and scripted extractor replies; then a live golden
 Q1 run goes past dedup through rerank, extraction and the quote audit and stops, showing ≤25 kept papers per
 sub-question, stored evidence items whose spans all re-verify against their abstracts, and the quote match rate
@@ -250,7 +272,7 @@ before Gate 1).
       `select_top` (§5.4c keep/drop rules), score cache in a global `rerank_cache` table (not the run-scoped
       `relevance_scores`; the graph node should still write `relevance_scores` per run). License checked: public domain.
       Still to do: load the model once per process (singleton) and the fallback to PubMed order (§5.4c).
-- [ ] Real `rerank` node: top-X per sub-question, `kept` / `drop_reason` stored, never deleted.
+- [x] Real `rerank` node: top-X per sub-question, `kept` / `drop_reason` stored, never deleted.
 - [ ] Extend the retrieval eval with **recall@25 after rerank** and precision@25 (the main §11.3b metric).
 - [ ] **D3** (100 / 200, and 500 / 1,000 if the proposal is approved), **D4** (rerank on/off, X = 25 vs 50, share
       truncated at 512 tokens), **D5** (`min_score` from BioASQ positives + ~50 person-labeled pairs).
@@ -258,10 +280,10 @@ before Gate 1).
       on deep pools.
 - [ ] **D6:** if the proposal is approved, Track B's comparison replaces the bucket test. If not, run the bucket test
       as §11.5 describes (broad code-built query from `key_concepts`, split `not_matched` into buckets c and d).
-- [ ] Extractor: `prompts/extractor.v1.md`, an `EvidenceDraft` schema (no ids, offsets, strength, study_id),
+- [x] Extractor: `prompts/extractor.v1.md`, an `EvidenceDraft` schema (no ids, offsets, strength, study_id),
       batches of 5, wired to the quote validator (one re-extract, then drop, log `validation.quote_*`).
 - [ ] Strength rules in code (§4.3). Seed `StudyDesign` from publication types (deferred from P1, item 18).
-- [ ] Set `models.extractor` from `models.list` (newest Flash-Lite) and record live extractor replies as fixtures.
+- [x] Set `models.extractor` from `models.list` (newest Flash-Lite) and record live extractor replies as fixtures.
 - [ ] **D7** (batch 5 vs 8), **D8** (fuzzy threshold 90 / 95 / 98, snaps judged by a person).
 - [ ] Thin-slice report for Gate 1: basic Synthesizer, code-only citations, `report.md`, the existing
       deterministic checks run over it. Golden Q1 and Q2 recorded as the **dev set**; Q3 and Q4 untouched (held back).

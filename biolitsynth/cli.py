@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         for sq_id, (n, kept) in lv.rerank_by_sub_question.items():
             print(f"rerank {sq_id}  {n:>3} candidates → {kept} kept")
         print(f"rerank model  {lv.rerank_model or '-'}")
-        print(f"evidence      {lv.evidence_items} items from {lv.papers_extracted} papers")
+        print(f"evidence      {lv.evidence_items} items ({lv.papers_extracted} abstracts read)")
         q = lv.quotes
         rate = f"{q.first_try_rate:.1%}" if q.first_try_rate is not None else "n/a"
         print(f"quotes        {q.first_try_ok}/{q.proposed} verbatim on first try ({rate}): {q.exact} exact, "
