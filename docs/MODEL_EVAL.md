@@ -148,3 +148,31 @@ adopted, `config.yaml` pins `prompt_versions.extractor: 1`, and no further edits
 **Limits, stated up front:** one dev question, and the same question that showed the problem, so this is prompt
 tuning on dev data. Golden Q2 (not looked at yet) is the check that the effect is not specific to Q1. D7 (batch
 size) and D13 (extractor model) stay untested.
+
+### Result (2026-11-17)
+v1: run `run_20261117_195157_4a5c9e`. v2: run `run_20261117_203458_dfc237`. Same 61 kept abstracts, same model.
+
+| | v1 | v2 |
+|---|---|---|
+| Findings | 61 | 76 |
+| Findings per abstract read | 1.00 | 1.25 |
+| Abstracts with 0 / 1 / 2 / 3 findings | 4 / 53 / 4 / 0 | 2 / 44 / 13 / 2 |
+| Quotes verbatim on the first try | 61/61 (58 exact, 3 normalized) | 76/76 (73 exact, 2 normalized, 1 fuzzy) |
+| `effect_size_unverified` / `sample_size_unverified` | 10 / 4 | 7 / 4 |
+
+| Rule | Needed | Got | |
+|---|---|---|---|
+| (a) quotes verbatim on the first try | ≥ 95% | 100% | pass |
+| (b) findings per abstract | ≥ 1.5 | 1.25 | **fail** |
+| (c) person reads 20 pairs | | not done ((b) already fails) | |
+
+**Decision: v2 is not adopted.** `config.yaml` pins `prompt_versions.extractor: 1`. `prompts/extractor.v2.md` stays
+in the repo, unused, as the record of what was tested. As pre-registered, no further edits were tried.
+
+**What the numbers show (observations, not a new decision):** v2 moved in the intended direction (15 abstracts with
+two or more findings instead of 4, and no loss of quote accuracy), but most abstracts still give one. The 1.5
+threshold was a guess made before looking at what the kept abstracts contain: 40 of the 61 are reviews or
+meta-analyses whose abstracts often state one pooled result or one summary claim, so "one finding" may be the right
+answer for many of them and the prompt may not be the main limit. What would tell the two apart is D7's data: about
+10 abstracts where a person lists the findings, so the share actually extracted can be measured. The remaining
+levers are batch size (D7) and the extractor model (D13), each under its own pre-registered rule.

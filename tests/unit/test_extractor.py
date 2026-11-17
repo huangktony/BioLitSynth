@@ -413,3 +413,13 @@ async def test_an_llm_error_is_not_caught(make_llm):
     papers, by = batch_papers(CASE_CONTROL)
     with pytest.raises(AssertionError):                    # ScriptedClient with no matching reply
         await extract_batch(papers, by, make_llm(ScriptedClient([])))
+
+
+async def test_extract_batch_stamps_the_requested_or_live_prompt_version(make_llm):
+    from biolitsynth.llm import load_prompt
+    papers, by = batch_papers(CASE_CONTROL)
+    reply = [finding(CASE_CONTROL, CC_QUOTE)]
+    [pinned] = await extract_batch(papers, by, make_llm(script(CASE_CONTROL, reply)), version=1)
+    [live] = await extract_batch(papers, by, make_llm(script(CASE_CONTROL, reply)))
+    assert [i.prompt_version for i in pinned.items] == ["extractor.v1"]
+    assert [i.prompt_version for i in live.items] == [load_prompt("extractor").version]

@@ -46,7 +46,7 @@ providers:                    # §7. Keys come from env vars (names below), neve
     {api_key_env: NVIDIA_API_KEY, base_url: "https://integrate.api.nvidia.com/v1", rpm: 40, max_retries: 4}
 
 # Pinned prompt versions (§11.5): a new version goes live only after its decision passes. Unlisted = latest.
-prompt_versions: {query_builder: 1}
+prompt_versions: {query_builder: 1, extractor: 1}   # extractor v2 not adopted (MODEL_EVAL EX-v2)
 
 rerank:                    # plan §5.4c: MedCPT cross-encoder, local model, no API calls
   model: ncbi/MedCPT-Cross-Encoder

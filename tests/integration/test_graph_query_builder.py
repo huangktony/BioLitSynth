@@ -6,7 +6,7 @@ import json
 import pytest
 
 from biolitsynth.graph.runner import manual_plan, run_live
-from biolitsynth.llm import BudgetExceeded, ModelNotVerified
+from biolitsynth.llm import BudgetExceeded, ModelNotVerified, load_prompt
 from biolitsynth.pubmed import TokenBucket
 from biolitsynth.rerank import FakeReranker
 from biolitsynth.store import Database
@@ -66,7 +66,7 @@ async def test_question_to_queries_to_deduped_papers(settings):
     stages = {r["stage"] for r in db.trace_events(lv.run_id)}
     assert {"plan", "query", "fetch", "dedup", "rerank", "extract"} <= stages and "synthesize" not in stages
     llm_spans = [r for r in db.trace_events(lv.run_id) if r["event_type"] == "llm_call"]
-    assert {r["prompt_version"] for r in llm_spans} == {"query_builder.v1", "extractor.v1"} and all(r["parent_span_id"] for r in llm_spans)
+    assert {r["prompt_version"] for r in llm_spans} == {"query_builder.v1", load_prompt("extractor").version} and all(r["parent_span_id"] for r in llm_spans)
     assert db.get_plan(lv.run_id).sub_questions[0].key_concepts == ["metformin", "colorectal neoplasms"]
     db.close()
     snap = json.loads((lv.run_dir / "02_queries.json").read_text())
@@ -130,5 +130,5 @@ async def test_without_sub_questions_the_lead_plans(settings):
     assert {r["query_string"] for r in lv.queries} == {REFINED1, DRAFT2} and lv.llm_calls == 4 + EXTRACT_CALLS
     db = Database(settings.paths.data_dir / "biolitsynth.db")
     spans = [r for r in db.trace_events(lv.run_id) if r["event_type"] == "llm_call"]
-    assert {r["prompt_version"] for r in spans} == {"lead.v1", "query_builder.v1", "extractor.v1"}
+    assert {r["prompt_version"] for r in spans} == {"lead.v1", "query_builder.v1", load_prompt("extractor").version}
     db.close()
