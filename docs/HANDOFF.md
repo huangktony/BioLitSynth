@@ -266,14 +266,14 @@ Depends on: P3's cross-encoder (all options use it). Runs alongside the extracto
   wait for the B3 result.
 
 ### B3 Run and decide (next)
-Setup (BioASQ file is local only, gitignored): `data/eval/training14b.json`. Index: `data/medcpt/pubmed.ivfpq`
+Setup (BioASQ file is local only, gitignored): `data/eval/bioasq/training14b.json`. Index: `data/medcpt/pubmed.ivfpq`
 (or download `huangktony/medcpt-pubmed-ivfpq` from Hugging Face, private for now; ask Tony for access).
 
 1. Smoke run, 2 questions, to check timing before the long run:
-   `.venv/bin/biolitsynth eval compare --bioasq data/eval/training14b.json --subset tests/golden/bioasq_compare_all.yaml --limit 2`
+   `.venv/bin/biolitsynth eval compare --bioasq data/eval/bioasq/training14b.json --subset tests/golden/bioasq_compare_all.yaml --limit 2`
 2. Main rows (Query Builder v1, pinned in `config.yaml`):
-   `.venv/bin/biolitsynth eval compare --bioasq data/eval/training14b.json --subset tests/golden/bioasq_compare_all.yaml`
-   `.venv/bin/biolitsynth eval compare --bioasq data/eval/training14b.json --subset tests/golden/bioasq_compare_recent.yaml`
+   `.venv/bin/biolitsynth eval compare --bioasq data/eval/bioasq/training14b.json --subset tests/golden/bioasq_compare_all.yaml`
+   `.venv/bin/biolitsynth eval compare --bioasq data/eval/bioasq/training14b.json --subset tests/golden/bioasq_compare_recent.yaml`
 3. Secondary row: the same two commands with `--prompt-version 2` (only the Boolean options matter for it).
 - Cost: about 1-3 Gemini calls per question (Query Builder only), 100-300 per pass; the free tier may need two
   days. Everything is cached (LLM replies, esearch, abstracts, rerank scores), so a crashed run resumes cheaply.
