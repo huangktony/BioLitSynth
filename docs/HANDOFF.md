@@ -92,6 +92,21 @@ not write these expected answers):
       (one or two sentences, with direction and certainty), the PMIDs it must cite (the review's key included
       studies that have abstracts), and the date it was written. The golden questions in §11.3 can be reused if a
       review covers them. Checked by a person, and by a script for "required PMIDs cited".
+
+      **Candidate reviews (found 2026-11-16 by a PubMed search; PMIDs checked, conclusions quoted from each
+      abstract).** These are candidates only. A person still reads them, writes the expected conclusion in their own
+      words, and picks the required PMIDs from the included studies.
+
+      | Golden question | Fit | Candidate reviews (PMID, journal, year): what the abstract concludes |
+      |---|---|---|
+      | Q1 Metformin and cancer incidence in type 2 diabetes | Strong; also a contradiction case | **38291943** (J Natl Cancer Inst 2024, mostly observational): "may be associated with a decreased risk of many cancer types, but high heterogeneity and risk of publication bias limit confidence". **38389430** (Diabetes Obes Metab 2024, 27 RCTs, ~20,700 people): "did not reduce cancer incidence" (RR 1.07, 95% CI 0.87-1.31). **28031313** (Int J Epidemiol 2017, bias evaluation): the studies "least likely to be affected by bias did not support a causal effect" |
+      | Q3 GLP-1 receptor agonists and pancreatitis | Strong; reviews mostly agree | **24736555** (BMJ 2014, 55 RCTs): "do not increase the risk of pancreatitis", evidence "not definitive". **32129106** (Expert Rev Clin Pharmacol 2020, 7 cardiovascular outcome trials, N = 55,932): no significant increase (OR 1.05, 95% CI 0.77-1.42). **40499738** (Gastroenterology 2025): no increase in pancreatitis; increases only for gallstones and GERD. **40988099** (Endocrinol Diabetes Metab 2025, 62 RCTs): "slightly increased risk", not significant when stratified by background medication |
+      | Q2 Vitamin D supplementation and COVID-19 outcomes | Good; a second contradiction case | **34029377** (Cochrane 2021, living review): "insufficient evidence ... very uncertain". **35086394** (Expert Rev Anti Infect Ther 2022, 6 RCTs, 551 patients): beneficial (pooled RR 0.60, 95% CI 0.40-0.92). Check for a newer version of the Cochrane living review before committing |
+      | Q4 Gut microbiome and Parkinson's disease progression | Weak: the reviews compare PD with controls and do not answer "progression" | **32557853** (Mov Disord 2020): Akkermansia increased; Roseburia and Faecalibacterium decreased in PD across countries. **40335465** (Nat Commun 2025, 4,489 samples): microbiome classifiers work within a study but generalise poorly across studies. Drop Q4 as review-anchored, or reword it to "how does the gut microbiome differ in PD" |
+
+      Suggested use: Q1 and Q3 as the review-anchored questions; Q1 (observational benefit vs RCT null) or Q2
+      (Cochrane "very uncertain" vs a small pooled benefit) as the contradiction case. The planted papers for the
+      contradiction case should be primary studies picked from these reviews' included lists, one or more per side.
 - [ ] **BioASQ answer checks (covers part of points 1 and 3 at scale).** BioASQ already holds expert answers fixed
       before our code existed, and we use only one field of them today. Each question has `documents` (relevant
       PMIDs, used now for recall), `exact_answer` (yes/no for 1,541 yes/no questions: 1,123 yes, 418 no),
