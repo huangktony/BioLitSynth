@@ -19,7 +19,7 @@ There are two task tracks below:
 | P0 Skeleton | Accepted |
 | P1 Retrieval | Accepted |
 | P2 Plan + Query | **Code complete, waiting for acceptance.** BioASQ dev run done: D2 provisional, QB-v2 not adopted |
-| P3 to P8 | Not started. Do not start P3 until Tony says "accepted" for P2 |
+| P3 to P8 | Not started, except the MedCPT reranker module, built early for Track B (Tony, 2026-11-06). P2 is still not accepted |
 
 What runs for real today (`biolitsynth run "<question>"`, no `--dry`):
 question → **Lead** plan (2-4 sub-questions, facets, bridges) → **Query Builder** (LLM writes a PubMed query, code
@@ -31,6 +31,8 @@ Also real but not wired into the graph yet (no real claims exist before P5):
 - Seven schema-only deterministic checks (`checks/deterministic.py`, §5.9).
 - BioASQ retrieval eval (`biolitsynth eval select | retrieval`, §11.3b).
 - OpenAI-compatible client for NIM / Groq (no key yet, mock-tested only).
+- MedCPT cross-encoder reranker (`rerank/`) and dense search over a local 35.9M-paper FAISS index
+  (`retrieval/dense.py`), used only by `biolitsynth eval compare` (Track B). The graph's `rerank` node is still a stub.
 
 BioASQ results so far (`docs/MODEL_EVAL.md`): Query Builder v1 reaches mean recall 0.29 (dev) / 0.47 (check set) in
 PubMed's top 100. Refinement added nothing (D2, provisional). Prompt v2 matched more relevant papers but not in the
@@ -90,8 +92,10 @@ Each phase ends with: tests green, the acceptance demo run live for Tony, a comm
 - [ ] Demo to Tony: golden Q1 live (above) + the BioASQ dev summary.
 
 ### P3 Rerank + Extraction (Gate 1, Fri Nov 20)
-- [ ] `rerank/`: MedCPT cross-encoder wrapper (singleton, device select, `relevance_scores` cache, `FakeReranker`),
-      fallback to PubMed order if the model can't load (§5.4c). New deps: `torch`, `transformers`. Check the license.
+- [~] `rerank/`: done for Track B (commit `49e3f5a`): cross-encoder wrapper with device select, `FakeReranker`,
+      `select_top` (§5.4c keep/drop rules), score cache in a global `rerank_cache` table (not the run-scoped
+      `relevance_scores`; the graph node should still write `relevance_scores` per run). License checked: public domain.
+      Still to do: load the model once per process (singleton) and the fallback to PubMed order (§5.4c).
 - [ ] Real `rerank` node: top-X per sub-question, `kept` / `drop_reason` stored, never deleted.
 - [ ] Extend the retrieval eval with **recall@25 after rerank** and precision@25 (the main §11.3b metric).
 - [ ] **D3** (100 / 200, and 500 / 1,000 if the proposal is approved), **D4** (rerank on/off, X = 25 vs 50, share
@@ -141,7 +145,12 @@ Each phase ends with: tests green, the acceptance demo run live for Tony, a comm
 
 ## Track B: Hybrid (Boolean + dense MedCPT), via a direct comparison
 
-**Gate to start:** Tony approves `docs/PROPOSAL_RETRIEVAL_COMPARISON.md`. It compares, with everything else held
+**Gate:** passed. Tony approved the comparison on 2026-11-06 ("add the medcpt, then implement the reranker, once
+ready let's benchmark"). The proposal itself still says "proposal"; mark it approved when the results land.
+
+**Pick up here:** B3. Everything before it is built and committed; no benchmark has run yet.
+
+It compares, with everything else held
 fixed (same Query Builder, same cross-encoder, same cut to 25 papers):
 1. **Boolean, deep:** top 500 / 1,000 by PubMed order → cross-encoder → top 25.
 2. **Full-corpus MedCPT:** top 200 / 1,000 from an IVF-PQ index over ~37M PubMed vectors → cross-encoder → top 25.
@@ -182,23 +191,62 @@ Depends on: P3's cross-encoder (all options use it). Runs alongside the extracto
 
       **`nprobe` = 256** for the comparison, fixed here from the build check, before any BioASQ question is run.
 
-### B2 Code for the comparison
-- [ ] `retrieval/dense.py`: load the index with `IO_FLAG_MMAP`, MedCPT query encoder (shared model loading with the
-      reranker), `search(sub_question_text, k, nprobe=32) → PMIDs`. Trace span per search.
-- [ ] Merge step: union per sub-question, `retrieved_by` gains `dense` / `boolean`, then the existing efetch →
-      dedup → rerank. A parallel-written key needs the `merge_unique` reducer (CLAUDE.md graph rules).
-- [ ] Eval: `biolitsynth eval retrieval --mode boolean|dense|hybrid --depth N`, reporting recall@25 after rerank,
-      precision@25, pool recall, unique relevant per branch, wall time, and "relevant PMIDs in the index".
-- [ ] Tests: a tiny FAISS index built in the test from random vectors with known nearest neighbours; merge and
-      provenance tests on the mock NCBI. No real index in CI.
+### B2 Code for the comparison (done 2026-11-07, commit `49e3f5a`)
+- [x] `biolitsynth/rerank/medcpt.py`: `CrossEncoderReranker` (lazy torch, `mps` on this Mac), `FakeReranker`,
+      `query_text`, `article_text`, `select_top`, `score_with_cache` (cache key: model, sha256 of query, PMID).
+- [x] `biolitsynth/retrieval/dense.py`: `DenseIndex.from_config` loads `data/medcpt/pubmed.ivfpq` into RAM (1.3 s;
+      plain `read_index`, not `IO_FLAG_MMAP`), MedCPT query encoder (CLS vector, max 64 tokens), `nprobe` 256.
+      `contains()` answers "is this PMID in the index"; the first call writes `data/medcpt/pubmed.ivfpq.pmids.npy`
+      (287 MB) and later calls read it.
+- [x] `biolitsynth/eval/compare.py` + `biolitsynth eval compare`. Per question: Query Builder → Boolean esearch top
+      1,000 + dense top 1,000 → efetch the union → cross-encoder scores every fetched paper once → seven options cut
+      from those lists: `boolean_order_25`, `dense_order_25` (no rerank, baselines), `boolean_500`, `boolean_1000`,
+      `dense_200`, `dense_1000`, `hybrid` (Boolean 500 + dense 200). Reports recall@25, precision@25 (÷25), pool
+      recall, relevant PMIDs in the index, relevant found only by each hybrid branch, timings, rerank pairs/s, and
+      an estimate for 3 sub-questions. Writes `runs/<eval_id>/compare.json` and appends to `docs/eval_log.jsonl`.
+- [x] Config: `rerank:` and `dense:` sections in `config.yaml`. Deps pinned: torch 2.14.1, transformers 5.20.2,
+      faiss-cpu 1.15.1, numpy 2.5.4 (all released before 2026-10-23).
+- [x] Tests (written by a separate agent from the spec, not the code author): `tests/unit/test_rerank.py`,
+      `tests/unit/test_dense.py` (tiny FAISS indexes), `tests/integration/test_eval_compare.py` (hand-computed
+      expected values in comments), `tests/slow/test_medcpt_models.py`. **334 offline tests pass.**
+- [ ] The two slow tests have **not been run**: `.venv/bin/pytest -m slow`. They need a person to approve their
+      inputs first: question "Does metformin use reduce the risk of colorectal cancer?", on-topic PMID 32968891,
+      off-topic PMID 7997269 (also 32968891's exact title as the dense query).
+- Smoke test on the laptop (real models): dense search k=1,000 in 0.05 s after the encoder loads (first call 3.4 s);
+  cross-encoder ~48 pairs/s on `mps` with ~180-token texts (real abstracts are longer, so expect less). On-topic
+  text scored +15.8, off-topic −16.0.
+- Not done on purpose: the graph merge step (`retrieved_by: dense`), two-stage rerank, the HF auto-download. All
+  wait for the B3 result.
 
-### B3 Run and decide
-- [ ] Both comparison sets, all three options (and Query Builder v2 on option 1 as the secondary row). One run per
-      option, no tuning between runs. Record everything in `docs/MODEL_EVAL.md`.
-- [ ] Apply the proposal's rule. If the hybrid is adopted: config `retrieval: {mode: hybrid, ...}`, code-built
-      Boolean branch with a recency clause from the dump date, gap signal (Boolean 0 hits and no dense result above
-      `min_score`), update plan §1.2, §1.3, §5.2-5.4c, §11.5 and the §3 diagram, bump to v1.6.
-- [ ] If not adopted: keep Boolean, set the candidate depth from D3, close Track B.
+### B3 Run and decide (next)
+Setup (BioASQ file is local only, gitignored): `data/eval/training14b.json`. Index: `data/medcpt/pubmed.ivfpq`
+(or download `huangktony/medcpt-pubmed-ivfpq` from Hugging Face, private for now; ask Tony for access).
+
+1. Smoke run, 2 questions, to check timing before the long run:
+   `.venv/bin/biolitsynth eval compare --bioasq data/eval/training14b.json --subset tests/golden/bioasq_compare_all.yaml --limit 2`
+2. Main rows (Query Builder v1, pinned in `config.yaml`):
+   `.venv/bin/biolitsynth eval compare --bioasq data/eval/training14b.json --subset tests/golden/bioasq_compare_all.yaml`
+   `.venv/bin/biolitsynth eval compare --bioasq data/eval/training14b.json --subset tests/golden/bioasq_compare_recent.yaml`
+3. Secondary row: the same two commands with `--prompt-version 2` (only the Boolean options matter for it).
+- Cost: about 1-3 Gemini calls per question (Query Builder only), 100-300 per pass; the free tier may need two
+  days. Everything is cached (LLM replies, esearch, abstracts, rerank scores), so a crashed run resumes cheaply.
+- Time: rerank dominates. Up to ~2,000 candidates per question at an estimated 25-50 pairs/s is ~1-1.5 min per
+  question, so ~1-2 h per 50-question set on the first pass. The v2 pass reuses most scores.
+- One run per option, no tuning between runs (proposal §4). `nprobe` 256 was fixed in B1, before any question ran.
+- [ ] Record all rows in `docs/MODEL_EVAL.md` and apply the proposal's rule:
+      (a) hybrid recall@25 ≥ best Boolean + 10 points on the any-date set; (b) not lower on the recent set;
+      (c) `est_hybrid_3_subq_s` ≤ 120 s; (d) index ≤ 5 GB (met: 2.69 GB + 287 MB id cache).
+- [ ] If adopted: config `retrieval: {mode: hybrid, ...}`, merge step in the graph (`merge_unique` reducer on any
+      key written by parallel branches), code-built Boolean branch with a recency clause from the dump date, gap
+      signal, HF download on first use with Boolean-only fallback, plan v1.6 (§1.2, §1.3, §5.2-5.4c, §11.5, §3
+      diagram), make the HF dataset public (Tony's call; cite MedCPT).
+- [ ] If not adopted: keep Boolean, set the candidate depth from D3, close Track B. The reranker stays (P3 needs it).
+
+### Track B loose ends
+- `KMP_DUPLICATE_LIB_OK=TRUE` is set in `biolitsynth/__init__.py`: torch and faiss-cpu each ship their own libomp on
+  macOS and the process aborts without it. Import order did not help. Revisit if a later wheel fixes it.
+- The index stops at the NCBI dump (chunks 0-36: 2023-10-28, chunk 37: 2024-03-24). The recent set will show it.
+- `scripts/build_medcpt_index.py` rebuilds the index (~6 h on a Kaggle CPU notebook, ~115 GB streamed, peak ~9 GB disk).
 
 ## Rules that bite
 
