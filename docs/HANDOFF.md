@@ -77,9 +77,9 @@ claim"), not answers fixed in advance. Each point, what exists, and what is miss
 
 | # | He asks for | What exists now | Missing |
 |---|---|---|---|
-| 1 | 2-3 questions a published systematic review answers; the conclusion each must reach and the PMIDs it must cite, committed before the pipeline is built | Four golden questions (§11.3) with expected properties; anchor PMIDs planned but not picked (Open now) | Everything. Must be committed **before P5 (Synthesizer) exists**, so nothing can be tuned toward it |
+| 1 | 2-3 questions a published systematic review answers; the conclusion each must reach and the PMIDs it must cite, committed before the pipeline is built | Four golden questions (§11.3) with expected properties; anchor PMIDs planned but not picked (Open now). BioASQ expert labels, used today for retrieval only | The review-anchored questions. Must be committed **before P5 (Synthesizer) exists**, so nothing can be tuned toward it. BioASQ yes/no answers can check conclusions at scale (below) |
 | 2 | The contradiction case: the planted papers and the disagreement the output must report | `--inject-conflict <pmid>` demo hook in the plan (§5.6); golden Q2 (vitamin D, COVID-19) is the intended conflict question | The planted PMIDs and the expected disagreement, written down and committed |
-| 3 | What agent output we reject, e.g. a conclusion whose cited abstract lacks the supporting finding | Code-only checks: quotes must match the abstract verbatim (quote span validator, §5.5), seven deterministic checks (§5.9), §11.4 injection cases | One explicit, short reject list in one place, including checks that do not use our own LLM verifier |
+| 3 | What agent output we reject, e.g. a conclusion whose cited abstract lacks the supporting finding | Code-only checks: quotes must match the abstract verbatim (quote span validator, §5.5), seven deterministic checks (§5.9), §11.4 injection cases | One explicit, short reject list in one place, including checks that do not use our own LLM verifier. BioASQ expert snippets can check cited evidence (below) |
 | 4 | Name the LLM; record its responses and PubMed results so the demo and checks rerun offline | Models in `config.yaml` (`gemini-3.8-flash` for Lead and Query Builder; extractor, synthesizer and critic still `TODO-verify-*`); SQLite LLM cache and PubMed cache; recorded Lead / Query Builder replies in `tests/fixtures/llm/` | The caches live in gitignored `data/`, so a fresh clone cannot replay the demo. Need a committed, recorded golden run that `pytest` and the demo can replay with no network |
 | 5 | How the two of us split the work | Not written anywhere | A short owner list |
 | 6 | A contact email | `ncbi.email_env` only (an env var for NCBI) | A team contact in `README.md` |
@@ -92,6 +92,21 @@ not write these expected answers):
       (one or two sentences, with direction and certainty), the PMIDs it must cite (the review's key included
       studies that have abstracts), and the date it was written. The golden questions in §11.3 can be reused if a
       review covers them. Checked by a person, and by a script for "required PMIDs cited".
+- [ ] **BioASQ answer checks (covers part of points 1 and 3 at scale).** BioASQ already holds expert answers fixed
+      before our code existed, and we use only one field of them today. Each question has `documents` (relevant
+      PMIDs, used now for recall), `exact_answer` (yes/no for 1,541 yes/no questions: 1,123 yes, 418 no),
+      `ideal_answer` (an expert's short answer) and `snippets` (the exact abstract sentences that support the
+      answer, with offsets). Two new checks, run on BioASQ yes/no questions not used for any tuning (draw a fresh
+      subset with `eval select --exclude` against dev, held-back, check and both compare sets):
+      - **Conclusion check:** the report's answer to the question matches `exact_answer`. Score: share correct, and
+        a list of the misses for a person to read.
+      - **Evidence check:** each cited quote overlaps an expert snippet from the same PMID (character offsets or a
+        fuzzy text match). A cited quote that overlaps no snippet is flagged, not rejected outright, because BioASQ
+        snippets are incomplete. A person reviews a sample of the flags.
+      Limits: BioASQ questions are narrow single facts with one agreed answer, so they cannot test synthesis across
+      many studies or the contradiction case, and the four golden demo questions are not in BioASQ. MedCPT may
+      have seen older BioASQ data (see Track B). So these checks add to the review-anchored questions; they do not
+      replace them.
 - [ ] **Contradiction case.** In the same file: the PMIDs to plant with `--inject-conflict`, which side each is on,
       and the disagreement the report must state (a CONTESTED claim citing both sides, with the expected balance label).
 - [ ] **Reject list** (add to the plan §6 and the report's "Rejected claims"):
@@ -100,7 +115,9 @@ not write these expected answers):
       - a claim whose cited quote does not state the finding, judged by a **person** on a sample of 20 claim-quote
         pairs per golden question (already §11's manual audit), not only by our Critic;
       - a conclusion that contradicts the committed review conclusion, or that omits a required PMID (script + person);
-      - a CONTESTED claim that cites only one side, and any causal wording from observational-only evidence (code).
+      - a CONTESTED claim that cites only one side, and any causal wording from observational-only evidence (code);
+      - on BioASQ yes/no questions, an answer that contradicts `exact_answer` (script; counted, and each miss read
+        by a person).
 - [ ] **Recorded replay.** After the first full live golden run, export its LLM replies and PubMed responses to
       `tests/fixtures/golden_runs/<question>/` and add a replay mode, so `pytest` and the demo rerun with zero live
       calls. Name every model ID used in the README.
